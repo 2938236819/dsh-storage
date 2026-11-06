@@ -113,5 +113,12 @@
   },
   "engines": {
     "node": "^20.19 || ^22.12 || >=24.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/engines",
+      "esbuild",
+      "prisma"
+    ]
   }
 }

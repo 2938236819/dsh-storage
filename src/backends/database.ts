@@ -23,6 +23,43 @@ export interface DatabaseBackendConfig {
   provider: DatabaseProvider;
   /** Full connection URL, e.g. mysql://user:pass@host:3306/dbname, file:/data/dsh.db */
   url: string;
+  /**
+   * IANA-named offset for the mariadb driver's `timezone` option (e.g.
+   * '+08:00'), applied when writing DATETIME columns. Only used by mysql.
+   */
+  timezone?: string;
+}
+
+/**
+ * Parse mysql://user:password@host[:port]/database into discrete connection
+ * options for the mariadb driver adapter. Passing the URI string itself
+ * pool-times-out in production (verified against a real MySQL 8.4);
+ * discrete host/port/user/password/database options work. Components are
+ * percent-decoded — credentials with @ : / arrive encoded in the URL.
+ */
+export function parseMysqlUrl(url: string): {
+  host: string;
+  port?: number;
+  user: string;
+  password: string;
+  database: string;
+} {
+  const decode = (value: string) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value; // plain value with a raw '%' — pass through unchanged
+    }
+  };
+  const u = new URL(url);
+  const port = u.port ? Number(u.port) : undefined;
+  return {
+    host: u.hostname,
+    ...(port !== undefined ? { port } : {}),
+    user: decode(u.username),
+    password: decode(u.password),
+    database: decode(u.pathname.replace(/^\//, '')),
+  };
 }
 
 /**
@@ -92,9 +129,14 @@ function mssqlConfig(url: string): Record<string, unknown> {
 export async function createAdapter(config: DatabaseBackendConfig): Promise<unknown> {
   switch (config.provider) {
     case 'mysql': {
-      // The mariadb driver accepts mariadb:// URIs; mysql:// is the same wire.
+      // Discrete options (verified against a real MySQL 8.4): the URI-string
+      // construction pool-times-out, and the timezone option is how the
+      // driver writes DATETIME values in the configured zone.
       const { PrismaMariaDb } = await import('@prisma/adapter-mariadb');
-      return new PrismaMariaDb(config.url.replace(/^mysql:\/\//, 'mariadb://'));
+      return new PrismaMariaDb({
+        ...parseMysqlUrl(config.url),
+        timezone: config.timezone ?? '+08:00',
+      });
     }
     case 'postgresql': {
       const { PrismaPg } = await import('@prisma/adapter-pg');
@@ -352,6 +394,25 @@ export class DatabaseBackend implements StorageBackend {
             ? JSON.parse(row.metadata)
             : row.metadata,
     };
+  }
+
+  /**
+   * Max created_at per session over active message rows — the database-side
+   * watermark for backfill gap detection (sessions with newer local logs
+   * have missing events).
+   */
+  async latestPerSession(): Promise<Map<string, Date>> {
+    const rows = await this.client().aiMessage.groupBy({
+      by: ['sessionId'],
+      _max: { createdAt: true },
+      where: { deletedAt: null },
+    });
+    const latest = new Map<string, Date>();
+    for (const row of rows) {
+      if (row?._max?.createdAt)
+        latest.set(row.sessionId, new Date(row._max.createdAt));
+    }
+    return latest;
   }
 
   private async writeSession(client: any, row: SessionRow): Promise<void> {

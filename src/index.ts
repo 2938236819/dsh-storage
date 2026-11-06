@@ -21,10 +21,33 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-session';
 import Schema from '@deepseek-ai/schemastery';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { DatabaseBackend, type DatabaseProvider } from './backends/database.js';
+import { backfillAll, type BackfillSummary, LAST_USAGE_KEY } from './backfill.js';
 import { compressionSnapshot } from './compaction.js';
+import {
+  configToUrl,
+  defaultConfigPath,
+  dshHome,
+  loadConfig,
+  saveConfig as saveConfigFile,
+  watchConfig,
+  type SyncConfig,
+} from './config.js';
+import { createTables, type CreateTableResult } from './ddl.js';
+import {
+  ConfigError,
+  HealthMonitor,
+  probeDatabase,
+  testConnection,
+  type ConnectionTestResult,
+  type HealthStatus,
+} from './health.js';
+import { drainToasts, wireNotifications, type StorageToast } from './notify.js';
 import { mergeToolResult, projectEvent, toolResultCallId, usageSampleOf } from './projector.js';
-import type { MessageRow, SessionRow, StorageBackend } from './types.js';
+import { registerStatusRoute } from './status-route.js';
+import type { MessageRow } from './types.js';
 
 export const name = 'dsh-storage';
 
@@ -40,17 +63,49 @@ export const Config = Schema.object({
       'sqlite',
     ),
     url: Schema.string().role('secret').default(''),
+    timezone: Schema.string().default('+08:00'),
   }),
 });
 
 export interface StoragePluginConfig {
   enabled: boolean;
-  database: { enabled: boolean; provider: DatabaseProvider; url: string };
+  database: { enabled: boolean; provider: DatabaseProvider; url: string; timezone?: string };
 }
 
 /** Explicit write API for a consumer's session-clear flow. */
 export interface DshStorageService {
   archiveSession(sessionId: string): Promise<string | null>;
+}
+
+/** Status/health RPC for the settings panel (Task 5) and notifications (Task 6). */
+export interface DshStorageStatusService {
+  snapshot(): HealthStatus;
+  testConnection(cfg: SyncConfig): Promise<ConnectionTestResult>;
+  /** Panel 「建表」: provider-appropriate DDL via packaged prisma schemas. */
+  createTables(cfg: SyncConfig): Promise<CreateTableResult>;
+  /** Panel form load/persist — the file the backend watches (T3). */
+  getConfig(): {
+    config: SyncConfig;
+    error?: 'parse' | 'missing-field';
+  };
+  saveConfig(cfg: SyncConfig): { config: SyncConfig };
+  /** Panel 「补传」 (T6): replay gap events from local session logs. */
+  backfill(): Promise<BackfillSummary>;
+  /** Toast notifications newer than the cursor (client polling, T6). */
+  toasts(payload: { sinceId?: number }): StorageToast[];
+}
+
+/** One database the mirror writes to, derived from the effective sync config. */
+interface MirrorTarget {
+  provider: DatabaseProvider;
+  url: string;
+  timezone?: string;
+}
+
+/** Lifecycle handle for one wired mirror (backends + event taps). */
+interface MirrorHandle {
+  archiveSession(sessionId: string): Promise<string | null>;
+  dispose(): Promise<void>;
 }
 
 /** Per-session live rollup used to maintain the session row. */
@@ -73,7 +128,6 @@ interface SessionAccum {
 }
 
 /** Metadata key for our usage bookkeeping — namespaced so other writers' fields never collide with it. */
-const LAST_USAGE_KEY = 'dsh-storage:lastUsage';
 const TOKEN_BASELINE_KEY = 'dsh-storage:token-baseline';
 const ARCHIVE_IN_PROGRESS = 'dsh-storage:archive-in-progress';
 
@@ -97,12 +151,207 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
   // durability checkpoint. The type-only import above registers the event
   // names; handler params stay `any` because storage also mirrors
   // plugin-owned event types (e.g. session/title) it does not depend on.
-  if (!config.enabled || !config.database.enabled || !config.database.url) return;
+  // Health monitor: probes the sync config's database (connect + SELECT 1 +
+  // ai_messages existence) with exponential-backoff retries. The probe
+  // re-reads $DSH_HOME/dsh-storage.json on every run, so config edits and
+  // corruption are picked up without a restart. Provided before the enabled
+  // guard so the panel can always query status (state stays 'disabled'
+  // while sync is off). enabled:false is handled by stopping the monitor
+  // (true 'disabled' state) — only a broken config surfaces as
+  // 'config-error'.
+  const monitor = new HealthMonitor(async () => {
+    const { config: syncConfig, error } = loadConfig();
+    if (error)
+      throw new ConfigError(`sync config invalid (${error})`);
+    await probeDatabase(syncConfig);
+  });
+  // Toast notifications (Task 6): good→bad / bad→good transitions are
+  // recorded host-side and drained by the browser toast portal through the
+  // status bridge. Mounted for the plugin's whole lifetime (like the monitor).
+  ctx.effect(() => wireNotifications(monitor));
+  ctx.effect(() => {
+    // The monitor lifecycle follows the sync config alone — always evaluated
+    // at plugin load (regardless of enabled flags) and re-evaluated on every
+    // config edit via T3's watchConfig (300ms debounce). Without this,
+    // starting disabled would leave the status stuck at 'disabled' forever
+    // after the user enables sync: enabled:false → monitor stopped with the
+    // true 'disabled' state; enabled:true (or a broken config, surfaced as
+    // config-error) → probe/recheck.
+    let monitorRunning = false;
+    const evaluate = () => {
+      const { config: syncConfig, error } = loadConfig();
+      if (!error && !syncConfig.enabled) {
+        monitor.stop();
+        monitorRunning = false;
+        return;
+      }
+      if (monitorRunning)
+        void monitor.recheck();
+      else {
+        monitorRunning = true;
+        monitor.start();
+      }
+    };
+    evaluate();
+    const unwatch = watchConfig(defaultConfigPath(), evaluate);
+    return () => {
+      unwatch();
+      monitor.stop();
+      monitorRunning = false;
+    };
+  });
+  const statusService: DshStorageStatusService = {
+    snapshot() {
+      const current = monitor.snapshot();
+      // Minimal config-error re-arm: the next snapshot call re-reads the
+      // config and recovers once it parses and connects again.
+      if (current.state === 'config-error')
+        void monitor.recheck();
+      return current;
+    },
+    testConnection(cfg) {
+      return testConnection(cfg);
+    },
+    createTables,
+    getConfig: () => loadConfig(),
+    saveConfig(cfg) {
+      saveConfigFile(cfg);
+      return { config: cfg };
+    },
+    toasts(payload) {
+      return drainToasts(payload?.sinceId ?? 0);
+    },
+    async backfill() {
+      const { config: cfg, error } = loadConfig();
+      if (error)
+        throw new Error(`sync config invalid (${error})`);
+      // A one-shot backend from the current config — backfill works even
+      // while the live mirror is disabled or its connection was rebuilt.
+      const backend = new DatabaseBackend({
+        provider: cfg.provider,
+        url: configToUrl(cfg),
+        timezone: cfg.timezone,
+      });
+      await backend.init();
+      try {
+        return await backfillAll(join(dshHome(), 'sessions'), backend);
+      }
+      finally {
+        await backend.close?.().catch(() => {});
+      }
+    },
+  };
+  ctx.provide('dshStorageStatus', statusService);
+  // Browser bridge (Task 5): the settings panel client calls this over the
+  // connection generic-RPC channel. Optional services — profiles without a
+  // web carrier simply skip the route.
+  ctx.effect(() => {
+    const dispose = registerStatusRoute(ctx, statusService);
+    return () => dispose?.();
+  });
+  // C1: the mirror derives its effective config from the same source the
+  // panel/health/backfill use — $DSH_HOME/dsh-storage.json. The JSON file
+  // wins whenever it exists (enabled:false in JSON means OFF, even when a
+  // legacy yaml block is enabled); the cordis yaml Config is only a compat
+  // fallback for pre-panel installs whose JSON file does not exist yet —
+  // exactly the state the switch runbook leaves users in after deleting the
+  // hand-written yaml block. Config edits rebuild the mirror without a
+  // restart: the watcher disposes the old backends + event tap and
+  // reconstructs them from the new file.
+  let mirror: MirrorHandle | undefined;
+  let activeTarget: MirrorTarget | undefined;
+  let desiredTarget: MirrorTarget | undefined;
+  let switching = false;
+  const settleMirror = () => {
+    if (switching || sameMirrorTarget(activeTarget, desiredTarget))
+      return;
+    if (mirror) {
+      // Tear the old mirror down first (drain pending writes, close
+      // backends); settleMirror re-runs and wires the next target once the
+      // teardown has landed.
+      switching = true;
+      const old = mirror;
+      mirror = undefined;
+      activeTarget = undefined;
+      void old
+        .dispose()
+        .catch(() => {})
+        .then(() => {
+          switching = false;
+          settleMirror();
+        });
+      return;
+    }
+    if (desiredTarget) {
+      mirror = startMirror(ctx, desiredTarget);
+      activeTarget = desiredTarget;
+    }
+  };
+  // The archive service outlives mirror rebuilds — it delegates to whichever
+  // mirror instance is currently wired.
+  ctx.provide('dshStorage', {
+    archiveSession(sessionId) {
+      return mirror?.archiveSession(sessionId) ?? Promise.resolve(null);
+    },
+  } satisfies DshStorageService);
+  const evaluateMirror = () => {
+    desiredTarget = computeMirrorTarget(config);
+    settleMirror();
+  };
+  evaluateMirror();
+  ctx.effect(() => {
+    const unwatch = watchConfig(defaultConfigPath(), evaluateMirror);
+    return () => unwatch();
+  });
+}
 
-  const backends: StorageBackend[] = [
+function sameMirrorTarget(a: MirrorTarget | undefined, b: MirrorTarget | undefined): boolean {
+  return (
+    a === b || (a?.provider === b?.provider && a?.url === b?.url && a?.timezone === b?.timezone)
+  );
+}
+
+/**
+ * The mirror's effective target. When ~/.dsh/dsh-storage.json exists it wins
+ * outright — a panel-configured install must mirror from the panel's config,
+ * and enabled:false there must actually stop mirroring; the yaml Config only
+ * drives the mirror when no JSON file exists (legacy pre-panel installs).
+ * A present-but-broken JSON file disables the mirror (the health monitor
+ * surfaces the parse error as 'config-error').
+ */
+function computeMirrorTarget(config: StoragePluginConfig): MirrorTarget | undefined {
+  const path = defaultConfigPath();
+  if (existsSync(path)) {
+    const { config: syncConfig, error } = loadConfig(path);
+    if (error || !syncConfig.enabled)
+      return undefined;
+    return {
+      provider: syncConfig.provider,
+      url: configToUrl(syncConfig),
+      timezone: syncConfig.timezone,
+    };
+  }
+  if (!config.enabled || !config.database.enabled || !config.database.url)
+    return undefined;
+  return {
+    provider: config.database.provider,
+    url: config.database.url,
+    timezone: config.database.timezone,
+  };
+}
+
+/**
+ * Wire one mirror instance against `target`: backend construction, the
+ * session/event tap, and durability checkpoints. The projector internals are
+ * unchanged from upstream — this factory only owns their lifecycle so the
+ * config watcher can dispose and reconstruct everything on config changes.
+ */
+function startMirror(ctx: Context, target: MirrorTarget): MirrorHandle {
+  const backends = [
     new DatabaseBackend({
-      provider: config.database.provider,
-      url: config.database.url,
+      provider: target.provider,
+      url: target.url,
+      timezone: target.timezone,
     }),
   ];
 
@@ -178,7 +427,7 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
     return task;
   }
 
-  function guard(call: (backend: StorageBackend) => Promise<void>): Promise<void> {
+  function guard(call: (backend: (typeof backends)[number]) => Promise<void>): Promise<void> {
     // Mirroring must never break the agent loop: log and swallow.
     return Promise.all(
       backends.map((backend) =>
@@ -213,7 +462,7 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
     return started;
   }
 
-  function fanout(call: (backend: StorageBackend) => Promise<void>): Promise<void> {
+  function fanout(call: (backend: (typeof backends)[number]) => Promise<void>): Promise<void> {
     // Event failures reject into the per-session queue, which is the no-throw
     // boundary. Swallowing here would make a partial write look committed.
     return track(ensureStarted().then(() => Promise.all(backends.map(call)).then(() => {})));
@@ -269,47 +518,36 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
     return { messageCount: 0, totalTokens: 0, metadata: { [TOKEN_BASELINE_KEY]: 0 } };
   }
 
-  ctx.effect(() => {
-    void ensureStarted().catch((error) => console.error('[dsh-storage] database error:', error));
-    return async () => {
-      toolBatches.clear();
-      await Promise.allSettled([...pending]);
-      sessions.clear();
-      toolCallMessages.clear();
-      await guard(async (backend) => backend.close?.());
-    };
-  });
+  void ensureStarted().catch((error) => console.error('[dsh-storage] database error:', error));
 
-  ctx.provide('dshStorage', {
-    archiveSession(sessionId: string): Promise<string | null> {
-      toolBatches.delete(sessionId);
-      // Join the same per-session chain as event writes, then discard the old
-      // in-memory rollup only after the database transaction commits.
-      const archived = (chains.get(sessionId) ?? Promise.resolve())
-        .then(() => ensureStarted())
-        .then(async () => {
-          const accum = sessions.get(sessionId);
-          if (accum && !accum.metadata[ARCHIVE_IN_PROGRESS]) {
-            // Freeze inside the session queue: all earlier events have now
-            // committed, and this first baseline survives every retry until
-            // the archive actually succeeds.
-            accum.metadata[TOKEN_BASELINE_KEY] = accum.totalTokens;
-            accum.metadata[ARCHIVE_IN_PROGRESS] = true;
-          }
-          const id = await backends[0].archiveSession(sessionId);
-          sessions.delete(sessionId);
-          toolCallMessages.delete(sessionId);
-          return id;
-        });
-      const settled = archived.then(
-        () => {},
-        () => {},
-      );
-      chains.set(sessionId, settled);
-      track(settled);
-      return archived;
-    },
-  } satisfies DshStorageService);
+  function archiveSession(sessionId: string): Promise<string | null> {
+    toolBatches.delete(sessionId);
+    // Join the same per-session chain as event writes, then discard the old
+    // in-memory rollup only after the database transaction commits.
+    const archived = (chains.get(sessionId) ?? Promise.resolve())
+      .then(() => ensureStarted())
+      .then(async () => {
+        const accum = sessions.get(sessionId);
+        if (accum && !accum.metadata[ARCHIVE_IN_PROGRESS]) {
+          // Freeze inside the session queue: all earlier events have now
+          // committed, and this first baseline survives every retry until
+          // the archive actually succeeds.
+          accum.metadata[TOKEN_BASELINE_KEY] = accum.totalTokens;
+          accum.metadata[ARCHIVE_IN_PROGRESS] = true;
+        }
+        const id = await backends[0].archiveSession(sessionId);
+        sessions.delete(sessionId);
+        toolCallMessages.delete(sessionId);
+        return id;
+      });
+    const settled = archived.then(
+      () => {},
+      () => {},
+    );
+    chains.set(sessionId, settled);
+    track(settled);
+    return archived;
+  }
 
   async function mirrorEvent(
     session: any,
@@ -413,7 +651,7 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
         ...accum.metadata,
         ...(accum.usageSample ? { [LAST_USAGE_KEY]: accum.usageSample } : {}),
       };
-      const sessionRow: SessionRow = {
+      const sessionRow = {
         sessionId,
         title: accum.title ?? null,
         messageCount: accum.messageCount,
@@ -431,7 +669,7 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
   }
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
-  ctx.on('session/event', (session: any, event: any) => {
+  const offEvent = ctx.on('session/event', (session: any, event: any) => {
     if (
       ![
         'user/message',
@@ -478,7 +716,7 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
     }
   });
 
-  ctx.on('session/disposed', (session: any) => {
+  const offDisposed = ctx.on('session/disposed', (session: any) => {
     const sessionId: string = session?.id ?? 'unknown';
     toolBatches.delete(sessionId);
     // The delete must run inside the session's chain — a synchronous delete
@@ -501,7 +739,7 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
 
   // Durability checkpoint: wait only for this session. Shutdown still drains
   // the global pending set; an unrelated slow session must not block this one.
-  ctx.on('session/flush', async (session: any) => {
+  const offFlush = ctx.on('session/flush', async (session: any) => {
     toolBatches.delete(session?.id ?? 'unknown');
     const chain = chains.get(session?.id ?? 'unknown');
     if (chain) {
@@ -514,4 +752,24 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
       console.error('[dsh-storage] database error:', error);
     }
   });
+
+  // Teardown runs both on config-driven rebuilds (dispose()) and fiber unload
+  // (the effect below); the stopped flag makes it idempotent so a rebuilt-away
+  // mirror is never closed twice.
+  let stopped = false;
+  const stop = async (): Promise<void> => {
+    if (stopped)
+      return;
+    stopped = true;
+    offEvent();
+    offDisposed();
+    offFlush();
+    toolBatches.clear();
+    await Promise.allSettled([...pending]);
+    sessions.clear();
+    toolCallMessages.clear();
+    await guard(async (backend) => backend.close?.());
+  };
+  ctx.effect(() => () => stop());
+  return { archiveSession, dispose: stop };
 }

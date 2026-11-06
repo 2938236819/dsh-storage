@@ -45,6 +45,8 @@ export interface StorageBackend {
   init?(): Promise<void>;
   /** Read the stored session row, for seeding the live rollup on resume. */
   readSession?(sessionId: string): Promise<SessionRow | null>;
+  /** Max message created_at per session across active rows (backfill gap detection). */
+  latestPerSession?(): Promise<Map<string, Date>>;
   /** Read one persisted logical message, including archived rows for redelivery. */
   readMessages(sessionId: string, messageId: string): Promise<MessageRow[]>;
   /** Find the newest active model message containing this exact tool call. */
