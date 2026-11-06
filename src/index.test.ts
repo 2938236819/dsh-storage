@@ -117,6 +117,28 @@ describe('dsh-storage plugin', () => {
     expect(backends.instances).toHaveLength(0);
   });
 
+  it('sets the tz-offset global from the config timezone at load', () => {
+    const key = '__DSH_STORAGE_TZ_OFFSET_MIN__' as const;
+    const hadGlobal = key in globalThis;
+    const previous = (globalThis as any)[key];
+    delete (globalThis as any)[key];
+    try {
+      apply(ctx, {
+        enabled: true,
+        database: {
+          enabled: true,
+          provider: 'mysql',
+          url: 'mysql://u:p@localhost/db',
+          timezone: '+05:30',
+        },
+      });
+      expect((globalThis as any)[key]).toBe(330);
+    } finally {
+      if (hadGlobal) (globalThis as any)[key] = previous;
+      else delete (globalThis as any)[key];
+    }
+  });
+
   it('wires the event tap and initializes the backend at load', async () => {
     apply(ctx, enabledConfig);
     expect(hookNames(ctx)).toEqual(

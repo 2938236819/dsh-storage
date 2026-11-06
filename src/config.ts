@@ -41,6 +41,22 @@ export function defaultConfigPath(): string {
     return join(dshHome(), 'dsh-storage.json');
 }
 
+/**
+ * Parse a config timezone string ('+08:00', '-05:00', '+05:30', 'Z'/'UTC')
+ * into signed minutes east of UTC. Invalid or absent input → 0 (the caller
+ * decides whether to warn). This mirrors what the patched
+ * @prisma/adapter-mariadb reads via globalThis.__DSH_STORAGE_TZ_OFFSET_MIN__.
+ */
+export function tzOffsetMinutes(tz: string): number {
+    if (tz === 'UTC' || tz === 'Z')
+        return 0;
+    const m = /^[+-](\d{2}):(\d{2})$/.exec(tz);
+    if (!m)
+        return 0;
+    const sign = tz[0] === '-' ? -1 : 1;
+    return sign * (Number(m[1]) * 60 + Number(m[2]));
+}
+
 /** Valid TCP port for the form: a finite integer in [0, 65535] (0 allowed for sqlite configs). */
 export function isValidPort(value: unknown): value is number {
     return (

@@ -32,6 +32,7 @@ import {
   dshHome,
   loadConfig,
   saveConfig as saveConfigFile,
+  tzOffsetMinutes,
   watchConfig,
   type SyncConfig,
 } from './config.js';
@@ -130,6 +131,27 @@ interface SessionAccum {
 /** Metadata key for our usage bookkeeping — namespaced so other writers' fields never collide with it. */
 const TOKEN_BASELINE_KEY = 'dsh-storage:token-baseline';
 const ARCHIVE_IN_PROGRESS = 'dsh-storage:archive-in-progress';
+
+/**
+ * The patched @prisma/adapter-mariadb (pnpm patch) reads this global when
+ * serializing Date args: the stock adapter hard-codes UTC on writes and
+ * ignores its `timezone` option, so we hand it the config's offset instead.
+ */
+const TZ_OFFSET_GLOBAL_KEY = '__DSH_STORAGE_TZ_OFFSET_MIN__';
+let tzWarningLogged = false;
+
+/** Publish the config timezone offset for the patched mariadb adapter. */
+function publishTzOffset(tz: string | undefined): void {
+  const minutes = tzOffsetMinutes(tz ?? '');
+  (globalThis as Record<string, unknown>)[TZ_OFFSET_GLOBAL_KEY] = minutes;
+  const wellFormed = tz !== undefined && (tz === 'UTC' || tz === 'Z' || /^[+-]\d{2}:\d{2}$/.test(tz));
+  if (!wellFormed && !tzWarningLogged) {
+    tzWarningLogged = true;
+    console.error(
+      `[dsh-storage] invalid timezone ${JSON.stringify(tz ?? '')} — assuming UTC offset 0`,
+    );
+  }
+}
 
 /** Shape-guarded restore of our usage sample from arbitrary metadata. */
 function usageSampleOfMetadata(value: unknown): SessionAccum['usageSample'] {
@@ -296,6 +318,10 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
   } satisfies DshStorageService);
   const evaluateMirror = () => {
     desiredTarget = computeMirrorTarget(config);
+    // Keep the adapter's timezone global in sync with the effective config —
+    // set at load and re-set whenever the watcher fires with a changed
+    // timezone (MirrorTarget equality already includes timezone).
+    publishTzOffset(desiredTarget?.timezone ?? config.database?.timezone);
     settleMirror();
   };
   evaluateMirror();
