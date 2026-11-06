@@ -14,6 +14,8 @@
  * inline style objects so no CSS file ships with the bundle.
  */
 
+import { makeDropdown } from './select.js';
+
 export const DEFAULT_TIMEZONES = ['+08:00', '+00:00', '+09:00', '-05:00', '-08:00', '+05:30'];
 
 /** Mirrors config.ts isValidPort — kept local so no node builtins enter the browser bundle. */
@@ -232,6 +234,7 @@ export interface StorageClient {
 /** One labeled form row: label left, control right. */
 export function makeStoragePanel(React: any) {
     const h: any = React.createElement;
+    const Dropdown = makeDropdown(React);
 
 
     /** One labeled form row: label left, control right. */
@@ -252,6 +255,9 @@ export function makeStoragePanel(React: any) {
         const [backfillResult, setBackfillResult] = (React as any).useState(null);
         const [busy, setBusy] = React.useState(null);
         const [saved, setSaved] = React.useState(false);
+        // Latest in-effect refreshStatus, so action handlers can re-sync the
+        // status banner without re-triggering the poll effect.
+        const refreshRef = React.useRef<() => void>(() => { });
 
         // Initial config load + status poll (30s).
         React.useEffect(() => {
@@ -268,7 +274,7 @@ export function makeStoragePanel(React: any) {
                     if (!disposed)
                         setConfigError(String(error));
                 });
-            const refresh = () => {
+            const refreshStatus = () => {
                 client
                     .snapshot()
                     .then((next: any) => {
@@ -277,13 +283,24 @@ export function makeStoragePanel(React: any) {
                     })
                     .catch(() => { });
             };
-            refresh();
-            const timer = setInterval(refresh, pollMs);
+            refreshRef.current = refreshStatus;
+            refreshStatus();
+            const timer = setInterval(refreshStatus, pollMs);
             return () => {
                 disposed = true;
                 clearInterval(timer);
             };
         }, [client, pollMs]);
+
+        /**
+         * Re-fetch the status snapshot once, after `delayMs`. The backend
+         * state machine transitions a few hundred ms after a config write
+         * (watchConfig debounce → monitor stop/start), so a post-save refresh
+         * waits out that debounce instead of racing it.
+         */
+        const scheduleStatusRefresh = (delayMs: number) => {
+            setTimeout(() => { refreshRef.current(); }, delayMs);
+        };
 
         if (cfg === null) {
             return h('div', { style: cardStyle, 'data-testid': 'dsh-storage-loading' },
@@ -302,7 +319,10 @@ export function makeStoragePanel(React: any) {
                 .testConnection(cfg)
                 .then(setTestResult)
                 .catch((error: unknown) => setTestResult(`fail:${String(error)}`))
-                .finally(() => setBusy(null));
+                .finally(() => {
+                    setBusy(null);
+                    refreshRef.current();
+                });
         };
         const runCreate = () => {
             setBusy('create');
@@ -318,6 +338,11 @@ export function makeStoragePanel(React: any) {
             client
                 .saveConfig(buildSaveConfig(cfg))
                 .then(() => setSaved(true))
+                .then(() => {
+                    // Backend state transitions land after the watchConfig
+                    // debounce (~300ms); wait it out, then refresh the banner.
+                    scheduleStatusRefresh(400);
+                })
                 .catch((error: unknown) => setConfigError(String(error)))
                 .finally(() => setBusy(null));
         };
@@ -354,10 +379,10 @@ export function makeStoragePanel(React: any) {
             ...extra,
         });
 
-        const selectControl = (extra: Record<string, unknown>, options: string[]) => h('select', {
-            style: { ...controlStyle, width: 220 },
-            ...extra,
-        }, options.map((value) => h('option', { key: value, value }, value)));
+        // DSH-native dropdown replaces the OS-rendered <select> popup;
+        // onChange reports the chosen value directly (no synthetic event).
+        const selectControl = (testId: string, value: string, options: string[], onPick: (value: string) => void) =>
+            h(Dropdown, { value, options, onChange: onPick, testId });
 
         return h('div', {
             style: {
@@ -410,11 +435,8 @@ export function makeStoragePanel(React: any) {
                     'data-testid': 'dsh-storage-enabled',
                     onChange: (e: any) => set({ enabled: e.target.checked }),
                 }), 'enabled'),
-                fieldRow('数据库类型', selectControl({
-                    value: cfg.provider,
-                    'data-testid': 'dsh-storage-provider',
-                    onChange: (e: any) => set({ provider: e.target.value }),
-                }, ['mysql', 'postgresql', 'sqlite', 'sqlserver']), 'provider'),
+                fieldRow('数据库类型', selectControl('dsh-storage-provider', cfg.provider,
+                    ['mysql', 'postgresql', 'sqlite', 'sqlserver'], (value) => set({ provider: value })), 'provider'),
                 ...(isSqlite
                     ? [
                         fieldRow('数据库文件路径', h('input', textControl({
@@ -462,15 +484,13 @@ export function makeStoragePanel(React: any) {
                     autoComplete: 'new-password',
                     onChange: (e: any) => set({ password: e.target.value }),
                 }), 'password'),
-                fieldRow('时区', selectControl({
-                    value: cfg.timezone,
-                    'data-testid': 'dsh-storage-timezone',
-                    onChange: (e: any) => set({ timezone: e.target.value }),
+                fieldRow('时区', selectControl('dsh-storage-timezone', cfg.timezone,
                     // A custom stored timezone becomes an option instead of silently
                     // displaying '+08:00' — which would mislead on the next save.
-                }, DEFAULT_TIMEZONES.includes(cfg.timezone)
-                    ? DEFAULT_TIMEZONES
-                    : [cfg.timezone, ...DEFAULT_TIMEZONES]), 'timezone'))),
+                    DEFAULT_TIMEZONES.includes(cfg.timezone)
+                        ? DEFAULT_TIMEZONES
+                        : [cfg.timezone, ...DEFAULT_TIMEZONES],
+                    (value) => set({ timezone: value })), 'timezone'))),
         // Actions + results card.
         h('div', { style: cardStyle },
             h('p', { style: captionStyle }, '操作'),

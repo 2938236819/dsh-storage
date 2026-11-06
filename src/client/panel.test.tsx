@@ -175,4 +175,34 @@ describe('rendered panel', () => {
     const pill = await screen.findByTestId('dsh-storage-backfill-result');
     expect(pill.textContent).toContain('补传完成：1 个会话，2 条事件，3 条重复跳过');
   });
+
+  it('a successful save re-fetches the snapshot without waiting for the poll', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = renderPanel();
+      // Initial mount snapshot + post-save refresh; the 30s poll stays silent.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.snapshot).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByTestId('dsh-storage-save'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.saveConfig).toHaveBeenCalledTimes(1);
+      expect(client.snapshot).toHaveBeenCalledTimes(1); // still stale
+      // Backend lands after the watchConfig debounce; refresh waits ~400ms.
+      await vi.advanceTimersByTimeAsync(400);
+      expect(client.snapshot).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(client.snapshot).toHaveBeenCalledTimes(3); // only one poll tick since
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a completed test-connection re-fetches the snapshot immediately', async () => {
+    const { client } = renderPanel();
+    await screen.findByTestId('dsh-storage-form');
+    expect(client.snapshot).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('dsh-storage-test'));
+    await vi.waitFor(() => expect(client.snapshot).toHaveBeenCalledTimes(2));
+    expect(client.saveConfig).not.toHaveBeenCalled();
+  });
 });
