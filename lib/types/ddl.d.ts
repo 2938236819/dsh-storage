@@ -19,6 +19,28 @@ export declare const SQLITE_DDL: string[];
 /** Embedded DDL statements for a provider; undefined → prisma-CLI fallback. */
 export declare function ddlStatementsFor(provider: SyncConfig['provider']): readonly string[] | undefined;
 /**
+ * Ensure both tables carry the nullable `device` column, then stamp every
+ * still-NULL row with `device` (the current machine's identifier — at
+ * migration time this machine owns all pre-feature rows). Executed by the
+ * panel's 「建表」 (createTables) and once per mirror startup; a no-op when
+ * the columns already exist (cheap information_schema check). mysql only —
+ * the other providers gain the column via their prisma schema `db push`.
+ *
+ * Returns 'ok' or a `fail:<reason>` string; never throws.
+ */
+export declare function ensureDeviceColumn(cfg: {
+    provider: SyncConfig['provider'];
+    url: string;
+    timezone?: string;
+}, device?: string): Promise<CreateTableResult>;
+/**
+ * Sanitize a device identifier for direct embedding into the migration SQL
+ * (no bound parameters — see ensureDeviceColumn). Strips quote, backslash,
+ * backtick and NUL characters and truncates to the column width; the value
+ * is still wrapped in single quotes at the call site.
+ */
+export declare function sqlString(device: string): string;
+/**
  * Create the ai_messages / ai_chat_histories tables for `cfg.provider`.
  * mysql/sqlite run embedded idempotent DDL over the adapter connection;
  * postgresql/sqlserver shell out to `prisma db push` against the packaged

@@ -31,12 +31,13 @@ import {
   defaultConfigPath,
   dshHome,
   loadConfig,
+  defaultDevice,
   saveConfig as saveConfigFile,
   tzOffsetMinutes,
   watchConfig,
   type SyncConfig,
 } from './config.js';
-import { createTables, type CreateTableResult } from './ddl.js';
+import { createTables, ensureDeviceColumn, type CreateTableResult } from './ddl.js';
 import {
   ConfigError,
   HealthMonitor,
@@ -101,6 +102,8 @@ interface MirrorTarget {
   provider: DatabaseProvider;
   url: string;
   timezone?: string;
+  /** Device identifier stamped on rows written through this mirror. */
+  device: string;
 }
 
 /** Lifecycle handle for one wired mirror (backends + event taps). */
@@ -253,6 +256,7 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
         provider: cfg.provider,
         url: configToUrl(cfg),
         timezone: cfg.timezone,
+        device: cfg.device,
       });
       await backend.init();
       try {
@@ -333,7 +337,11 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
 
 function sameMirrorTarget(a: MirrorTarget | undefined, b: MirrorTarget | undefined): boolean {
   return (
-    a === b || (a?.provider === b?.provider && a?.url === b?.url && a?.timezone === b?.timezone)
+    a === b ||
+    (a?.provider === b?.provider &&
+      a?.url === b?.url &&
+      a?.timezone === b?.timezone &&
+      a?.device === b?.device)
   );
 }
 
@@ -355,6 +363,7 @@ function computeMirrorTarget(config: StoragePluginConfig): MirrorTarget | undefi
       provider: syncConfig.provider,
       url: configToUrl(syncConfig),
       timezone: syncConfig.timezone,
+      device: syncConfig.device,
     };
   }
   if (!config.enabled || !config.database.enabled || !config.database.url)
@@ -363,6 +372,7 @@ function computeMirrorTarget(config: StoragePluginConfig): MirrorTarget | undefi
     provider: config.database.provider,
     url: config.database.url,
     timezone: config.database.timezone,
+    device: defaultDevice(),
   };
 }
 
@@ -378,6 +388,7 @@ function startMirror(ctx: Context, target: MirrorTarget): MirrorHandle {
       provider: target.provider,
       url: target.url,
       timezone: target.timezone,
+      device: target.device,
     }),
   ];
 
@@ -467,6 +478,8 @@ function startMirror(ctx: Context, target: MirrorTarget): MirrorHandle {
   // All sessions share init and its retry delay; queued events wait rather than skip the barrier.
   let started: Promise<void> | undefined;
   let retryAt = 0;
+  /** Device-column migration runs once per mirror instance, after init. */
+  let migrated = false;
 
   function ensureStarted(): Promise<void> {
     if (!started) {
@@ -475,6 +488,14 @@ function startMirror(ctx: Context, target: MirrorTarget): MirrorHandle {
           const delay = retryAt - Date.now();
           if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
           await Promise.all(backends.map((backend) => backend.init?.()));
+          if (!migrated) {
+            migrated = true;
+            // Cheap information_schema check + ALTER/UPDATE only when the
+            // device column is missing (multi-device shared database).
+            const result = await ensureDeviceColumn(target, target.device);
+            if (result !== 'ok')
+              console.error(`[dsh-storage] device column migration: ${result}`);
+          }
         })(),
       );
       started = attempt;

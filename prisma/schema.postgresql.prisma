@@ -28,6 +28,7 @@ model AiMessage {
   toolCalls     Json?     @map("tool_calls")
   agentId       String?   @map("agent_id") @db.VarChar(100)
   metadata      Json?
+  device        String?   @map("device") @db.VarChar(100)
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamp(0)
   updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamp(0)
   deletedAt     DateTime? @map("deleted_at") @db.Timestamp(0)
@@ -57,6 +58,7 @@ model AiChatHistory {
   firstMessageAt DateTime? @map("first_message_at") @db.Timestamp(6)
   lastMessageAt  DateTime? @map("last_message_at") @db.Timestamp(6)
   metadata       Json?
+  device         String?   @map("device") @db.VarChar(100)
   deletedAt      DateTime? @map("deleted_at") @db.Timestamp(6)
 
   // Relations

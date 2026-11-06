@@ -423,6 +423,10 @@ export function makeStoragePanel(React: any) {
                         key: index,
                         style: { fontSize: 12, color: TOKEN.labelTertiary },
                     }, detail)),
+                h('span', {
+                    style: { fontSize: 12, color: TOKEN.labelTertiary },
+                    'data-testid': 'dsh-storage-device-badge',
+                }, `设备: ${cfg?.device ?? '—'}`),
                 configError === null ? null : h('span', {
                     style: { fontSize: 12, color: TONE_COLOR.bad },
                 }, configError))),
@@ -470,6 +474,14 @@ export function makeStoragePanel(React: any) {
                             onChange: (e: any) => set({ database: e.target.value }),
                         })), 'database'),
                     ]),
+                // Rows are stamped with this identifier so several machines can
+                // share one database; defaults to the OS hostname server-side.
+                fieldRow('设备名称', h('input', textControl({
+                    value: cfg.device ?? '',
+                    'data-testid': 'dsh-storage-device',
+                    placeholder: '默认为主机名',
+                    onChange: (e: any) => set({ device: e.target.value }),
+                })), 'device'),
                 fieldRow('用户名', h('input', textControl({
                     value: cfg.user,
                     'data-testid': 'dsh-storage-user',

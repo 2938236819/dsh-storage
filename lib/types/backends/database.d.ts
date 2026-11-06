@@ -22,6 +22,12 @@ export interface DatabaseBackendConfig {
      * '+08:00'), applied when writing DATETIME columns. Only used by mysql.
      */
     timezone?: string;
+    /**
+     * Device identifier stamped on every ai_messages / ai_chat_histories row
+     * this backend writes, so several machines can share one database.
+     * Falls back to the OS hostname when unset.
+     */
+    device?: string;
 }
 /**
  * Parse mysql://user:password@host[:port]/database into discrete connection
@@ -43,6 +49,8 @@ export declare class DatabaseBackend implements StorageBackend {
     readonly name = "database";
     private prisma;
     constructor(config: DatabaseBackendConfig);
+    /** Device identifier stamped on rows written through this backend. */
+    private get device();
     private client;
     /** Load the pre-generated client for the configured provider (seam for tests). */
     protected loadClient(): Promise<any>;

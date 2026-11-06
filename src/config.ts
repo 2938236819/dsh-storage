@@ -7,7 +7,7 @@
  * wrong-shape files fall back to defaults with an error flag.
  */
 import { chmodSync, readFileSync, renameSync, watch, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { hostname, homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 export type SyncConfig = {
@@ -19,7 +19,19 @@ export type SyncConfig = {
     password: string;
     database: string;
     timezone: string;
+    /** Identifier stamped on mirrored rows so several machines can share one database. */
+    device: string;
 };
+
+/**
+ * Default device identifier: the OS hostname, truncated to the column width
+ * (VARCHAR(100)). Empty hostnames (theoretically possible) fall back to a
+ * stable placeholder so rows are never stamped with ''.
+ */
+export function defaultDevice(): string {
+    const name = hostname().trim().slice(0, 100);
+    return name || 'unknown-device';
+}
 
 export const DEFAULT_CONFIG: SyncConfig = {
     enabled: false,
@@ -30,6 +42,7 @@ export const DEFAULT_CONFIG: SyncConfig = {
     password: '',
     database: '',
     timezone: '+08:00',
+    device: defaultDevice(),
 };
 
 /** Resolve the DSH home directory: $DSH_HOME or ~/.dsh. */
@@ -97,6 +110,9 @@ export function syncConfigProblem(value: unknown): string | undefined {
         return 'cfg.database must be a string';
     if (typeof c.timezone !== 'string')
         return 'cfg.timezone must be a string';
+    // `device` is deliberately NOT validated: configs written before this
+    // field existed (and hand-edited files) load with the hostname default
+    // instead of surfacing a missing-field error.
     return undefined;
 }
 
@@ -119,11 +135,21 @@ export function loadConfig(path: string = defaultConfigPath()): {
         if (!isSyncConfig(parsed)) {
             return { config: { ...DEFAULT_CONFIG }, error: 'missing-field' };
         }
-        return { config: parsed };
+        return { config: withDevice(parsed) };
     } catch {
         // Missing or unreadable file → plain defaults, no error.
         return { config: { ...DEFAULT_CONFIG } };
     }
+}
+
+/**
+ * Fill in a missing/empty `device` on a validated config (pre-device JSON
+ * files load without a missing-field error; the hostname default stamps
+ * their rows). A stored non-empty string wins — that is the multi-device case.
+ */
+function withDevice(c: SyncConfig): SyncConfig {
+    const device = typeof c.device === 'string' ? c.device.trim().slice(0, 100) : '';
+    return device ? { ...c, device } : { ...c, device: defaultDevice() };
 }
 
 /**

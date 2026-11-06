@@ -15,6 +15,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { createHash } from 'node:crypto';
+import { defaultDevice } from '../config.js';
 import type { MessageRow, SessionRow, StorageBackend } from '../types.js';
 
 export type DatabaseProvider = 'mysql' | 'postgresql' | 'sqlite' | 'sqlserver';
@@ -28,6 +29,12 @@ export interface DatabaseBackendConfig {
    * '+08:00'), applied when writing DATETIME columns. Only used by mysql.
    */
   timezone?: string;
+  /**
+   * Device identifier stamped on every ai_messages / ai_chat_histories row
+   * this backend writes, so several machines can share one database.
+   * Falls back to the OS hostname when unset.
+   */
+  device?: string;
 }
 
 /**
@@ -162,6 +169,11 @@ export class DatabaseBackend implements StorageBackend {
 
   constructor(private config: DatabaseBackendConfig) {}
 
+  /** Device identifier stamped on rows written through this backend. */
+  private get device(): string {
+    return this.config.device || defaultDevice();
+  }
+
   private client(): any {
     if (!this.prisma) throw new Error('dsh-storage database is not initialized');
     return this.prisma;
@@ -213,6 +225,7 @@ export class DatabaseBackend implements StorageBackend {
       agentId: row.agentId ?? undefined,
       metadata: this.jsonField({ id: row.id, ...(row.metadata ?? {}) }),
       createdAt: row.createdAt,
+      device: this.device,
     };
   }
 
@@ -432,6 +445,7 @@ export class DatabaseBackend implements StorageBackend {
       firstMessageAt: row.firstMessageAt ?? undefined,
       lastMessageAt: row.lastMessageAt ?? undefined,
       metadata: this.jsonField(row.metadata),
+      device: this.device,
     };
     if (existing) {
       await client.aiChatHistory.update({ where: { id: existing.id }, data });
@@ -495,6 +509,7 @@ export class DatabaseBackend implements StorageBackend {
           where: { id: active.id },
           data: {
             ...rollup,
+            device: this.device,
             metadata: this.jsonField({
               ...metadataOf(active.metadata),
               [TOKEN_BASELINE_KEY]: Number(active.totalTokens ?? 0n),
@@ -510,6 +525,7 @@ export class DatabaseBackend implements StorageBackend {
           sessionId,
           ...rollup,
           totalTokens: 0n,
+          device: this.device,
           metadata: this.jsonField({ [ARCHIVE_IN_PROGRESS]: true }),
         },
         select: { id: true },
@@ -575,6 +591,7 @@ export class DatabaseBackend implements StorageBackend {
           totalTokens,
           firstMessageAt: stats._min.createdAt,
           lastMessageAt: stats._max.createdAt,
+          device: this.device,
           metadata: this.jsonField(metadata),
         },
       });

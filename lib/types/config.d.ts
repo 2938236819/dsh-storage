@@ -7,7 +7,15 @@ export type SyncConfig = {
     password: string;
     database: string;
     timezone: string;
+    /** Identifier stamped on mirrored rows so several machines can share one database. */
+    device: string;
 };
+/**
+ * Default device identifier: the OS hostname, truncated to the column width
+ * (VARCHAR(100)). Empty hostnames (theoretically possible) fall back to a
+ * stable placeholder so rows are never stamped with ''.
+ */
+export declare function defaultDevice(): string;
 export declare const DEFAULT_CONFIG: SyncConfig;
 /** Resolve the DSH home directory: $DSH_HOME or ~/.dsh. */
 export declare function dshHome(): string;

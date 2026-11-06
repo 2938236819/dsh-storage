@@ -61,7 +61,7 @@ vi.mock('@prisma/adapter-libsql', () => ({ PrismaLibSql: adapterMocks.PrismaLibS
 vi.mock('@prisma/adapter-mssql', () => ({ PrismaMssql: adapterMocks.PrismaMssql }));
 
 const url = 'file:/tmp/dsh.db';
-const baseConfig = { provider: 'sqlite', url } as const;
+const baseConfig = { provider: 'sqlite', url, device: 'test-device' } as const;
 
 const messageRow: MessageRow = {
   id: 'm1',
@@ -489,8 +489,34 @@ describe('DatabaseBackend', () => {
     expect(call.update.metadata).toEqual(call.create.metadata);
   });
 
-  it('derives a stable PK per (sessionId, messageId)', async () => {
+  it('stamps the configured device on written message and session rows', async () => {
     await backend.init();
+    const prisma = prismaMock.instances[0];
+    prisma.aiChatHistory.findFirst.mockResolvedValue(null);
+
+    await backend.upsertEvent(messageRow, sessionRow);
+
+    const message = prisma.aiMessage.upsert.mock.calls[0][0];
+    expect(message.create.device).toBe('test-device');
+    expect(message.update.device).toBe('test-device');
+    const session = prisma.aiChatHistory.create.mock.calls[0][0];
+    expect(session.data.device).toBe('test-device');
+  });
+
+  it('falls back to the OS hostname when no device is configured', async () => {
+    backend = new DatabaseBackend({ provider: 'sqlite', url });
+    await backend.init();
+    const prisma = prismaMock.instances[0];
+
+    await backend.upsertMessage(messageRow);
+
+    const device = prisma.aiMessage.upsert.mock.calls[0][0].create.device;
+    expect(typeof device).toBe('string');
+    expect(device.length).toBeGreaterThan(0);
+    expect(device.length).toBeLessThanOrEqual(100);
+  });
+
+  it('derives a stable PK per (sessionId, messageId)', async () => {    await backend.init();
     const prisma = prismaMock.instances[0];
 
     await backend.upsertMessage(messageRow);
@@ -604,6 +630,7 @@ describe('DatabaseBackend', () => {
         totalTokens: 0n,
         firstMessageAt: first,
         lastMessageAt: last,
+        device: 'test-device',
         metadata: {},
       },
     });
@@ -640,6 +667,7 @@ describe('DatabaseBackend', () => {
         totalTokens: 0n,
         firstMessageAt: new Date(1700000000000),
         lastMessageAt: new Date(1700000000000),
+        device: 'test-device',
         metadata: { 'dsh-storage:archive-in-progress': true },
       },
       select: { id: true },
@@ -686,6 +714,7 @@ describe('DatabaseBackend', () => {
         totalTokens: 0n,
         firstMessageAt: first,
         lastMessageAt: last,
+        device: 'test-device',
         metadata: {},
       },
     });
@@ -998,6 +1027,7 @@ describe('DatabaseBackend', () => {
         totalTokens: 0n,
         firstMessageAt: first,
         lastMessageAt: last,
+        device: 'test-device',
         metadata: {},
       },
     });

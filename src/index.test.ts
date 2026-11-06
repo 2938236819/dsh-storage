@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, inject, name } from './index.js';
+import { defaultDevice } from './config.js';
 
 const backends = vi.hoisted(() => ({
   instances: [] as any[],
@@ -145,7 +146,14 @@ describe('dsh-storage plugin', () => {
       expect.arrayContaining(['session/event', 'session/disposed', 'session/flush']),
     );
     const backend = backends.instances[0];
-    expect(backend.config).toEqual({ provider: 'mysql', url: enabledConfig.database.url, timezone: undefined });
+    // The JSON-file config predates the device field: the loader fills the
+    // hostname default and the mirror stamps rows with it.
+    expect(backend.config).toEqual({
+      provider: 'mysql',
+      url: enabledConfig.database.url,
+      timezone: undefined,
+      device: defaultDevice(),
+    });
 
     // No 'ready' event in this cordis fork — init starts at plugin load.
     await flush();

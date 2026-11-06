@@ -84,3 +84,38 @@ Plugin now publishes `globalThis.__DSH_STORAGE_TZ_OFFSET_MIN__` for the pnpm-pat
 - `src/index.ts`: `publishTzOffset()` sets the global in `evaluateMirror()` (initial load + every `watchConfig` fire; re-set only when the effective timezone string changes). Effective tz = mirror target's timezone, falling back to the yaml `config.database.timezone` when the JSON file is absent/disabled. Invalid/absent values log once (module-level flag) and map to 0.
 - Tests: `src/config.test.ts` (+480/-300/0/330/invalid cases), `src/index.test.ts` new case asserting `apply()` sets the global (330 for '+05:30') with cleanup.
 - Full suite 204 passed (12 files); `npm run build` green.
+
+## Device column (multi-device shared database)
+
+Goal: stamp a nullable `device VARCHAR(100)` on mirrored `ai_messages` / `ai_chat_histories` rows so several DSH machines can share one MySQL database without ambiguity (Phase 2 AI memory-search can filter by device).
+
+### Schema / DDL
+- `prisma/schema.{mysql,postgresql,sqlserver}.prisma`: `device String? @map("device") @db.VarChar(100)` on both models; `schema.sqlite.prisma`: plain `String?`. Clients regenerated at build (`pnpm generate` — all four variants).
+- `src/ddl.ts` `MYSQL_DDL`: `\`device\` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL` added to both CREATE TABLE statements; `SQLITE_DDL` got `"device" TEXT` on both tables.
+
+### Migration (`ensureDeviceColumn` in src/ddl.ts)
+- One aggregate `information_schema.columns` COUNT — cheap on every mirror start; runs `ALTER TABLE … ADD COLUMN \`device\` varchar(100) NULL` per table only when columns are missing.
+- Then counts rows with `device IS NULL` and, if any, backfills both tables with the CURRENT configured device (this machine owns all pre-feature rows). NULL never persists post-migration: rows written after the feature always carry their writer's device, so a later machine's backfill cannot be re-stamped.
+- Executed by `createTables` (after embedded DDL, mysql) AND once per mirror start (in `startMirror`'s `ensureStarted`, after backend init). mysql only; other providers get the column via prisma `db push` (their clients still write device).
+- Adapter quirk found against the real DB: `@prisma/adapter-mariadb`'s `executeRaw` indexes `query.argTypes[i]`, populated only by the prisma engine — direct adapter calls with bound parameters throw "Cannot read properties of undefined (reading '0')". The backfill therefore embeds a sanitized literal (`sqlString()` strips quotes/backticks/backslashes/NUL, truncates to 100).
+
+### Config
+- `SyncConfig.device: string`; `defaultDevice()` = OS hostname trimmed/truncated to 100 (`'unknown-device'` fallback). `DEFAULT_CONFIG.device` = hostname.
+- `syncConfigProblem` does NOT validate device; `loadConfig` fills missing/empty/non-string device with the hostname (no `missing-field` error for pre-device config files). A stored non-empty value wins and is trimmed/truncated on load.
+
+### Write path
+- Seam: `DatabaseBackend` (`src/backends/database.ts`) — `device` added to `DatabaseBackendConfig` (hostname fallback getter); stamped on `toDbData` (every ai_messages upsert, create+update) and `writeSession` (rollup create+update), plus the archive history create / in-progress update / finalize update. Reads unchanged; `updateMany` count-resets don't touch device.
+- `src/index.ts`: `MirrorTarget.device` (JSON-config device, hostname fallback for legacy yaml path), equality includes device (device rename rebuilds the mirror), backend + backfill backend constructed with the device.
+
+### Panel
+- 连接设置 card: new 「设备名称」 text field (`dsh-storage-device`, placeholder 默认为主机名) after 数据库/路径; status banner shows `设备: <name>` tertiary text (`dsh-storage-device-badge`).
+
+### Tests (220 passed, 13 files)
+- config: hostname default + truncation; missing/non-string device → hostname without error; roundtrip preserves a stored device.
+- ddl: MYSQL_DDL contains the column; `ensureDeviceColumn` no-op when columns exist + nothing unstamped; ALTER+backfill when missing; backfill-only when columns pre-exist unstamped (mariadb result-shape `{columnNames,rows}` handled); partial migration; executeRaw fallback; failure → `fail:`; non-mysql skip; createTables integration; `sqlString` sanitization.
+- backend: message+session rows carry the configured device; hostname fallback when unset; archive exact-data assertions updated.
+- panel: 设备名称 renders/binds/saves; banner shows `设备: …` and updates live.
+
+### Verification
+- `npm test` 220 passed; `npm run build` (4 prisma variants + tsc + esbuild client) green; typecheck clean except two PRE-EXISTING `TS2347` errors in `src/client/panel.tsx:260` / `src/client/select.tsx:91-92` (present on feat/rebuild before this task).
+- Real MySQL 118.89.22.135/dsh_memory: `ensureDeviceColumn` → ok. Both tables had `device varchar(100)` (columns pre-existed, unstamped); backfill stamped 2152 ai_messages + 45 ai_chat_histories rows with `Mac` (this hostname), 0 NULLs remain, COUNT(DISTINCT device)=1 per table. Spot-check via information_schema + per-table aggregate SELECT above.

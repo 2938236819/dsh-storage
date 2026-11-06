@@ -42,6 +42,7 @@ const baseCfg = {
   password: 'p',
   database: 'db',
   timezone: '+08:00',
+  device: 'MacBook-Pro',
 };
 
 function renderPanel(client = makeClient(), pollMs = 30_000) {
@@ -174,6 +175,19 @@ describe('rendered panel', () => {
     fireEvent.click(screen.getByTestId('dsh-storage-backfill'));
     const pill = await screen.findByTestId('dsh-storage-backfill-result');
     expect(pill.textContent).toContain('补传完成：1 个会话，2 条事件，3 条重复跳过');
+  });
+
+  it('shows 当前设备 in the status banner and binds the 设备名称 field', async () => {
+    const { client } = renderPanel();
+    const banner = await screen.findByTestId('dsh-storage-status');
+    expect(banner.textContent).toContain('设备: MacBook-Pro');
+    const device = screen.getByTestId('dsh-storage-device') as HTMLInputElement;
+    expect(device.value).toBe('MacBook-Pro');
+    fireEvent.change(device, { target: { value: 'work-station' } });
+    fireEvent.click(screen.getByTestId('dsh-storage-save'));
+    await vi.waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
+    expect((client.saveConfig.mock.calls[0] as any[])[0].device).toBe('work-station');
+    expect(screen.getByTestId('dsh-storage-device-badge').textContent).toBe('设备: work-station');
   });
 
   it('a successful save re-fetches the snapshot without waiting for the poll', async () => {
