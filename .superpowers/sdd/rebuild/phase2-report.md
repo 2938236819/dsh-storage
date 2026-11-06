@@ -102,3 +102,50 @@ All four adapters' `queryRaw` return `{ columnNames, rows: value[][] }` — norm
   while readToolCallMessages-style active-only filtering was not applied.
 - `memory_read` with `around` returns the ≤limit window ending at the instant (not ±half-window);
   simple and provider-portable, documented in the tool description.
+
+## 6. Fix round (review follow-up, 2026-11-06)
+
+TDD: failing tests written first (`npx vitest run src/memory-tools.test.ts` → 3 failed / 26 passed),
+then fixes, then full suite + build green.
+
+### Finding 1 (Important) — memory_read without `around` returned newest-first order
+
+- `src/memory-tools.test.ts`: new execution test "returns the newest window in chronological
+  (ascending) order without `around`" — fake connection returns newest-first rows (as the DESC SQL
+  does); expects `messages[0]` = oldest (`你好`), ascending `created_at`, args `['s1', 30]`.
+  Also adjusted the pre-existing chronological test to feed newest-first fixture rows (realistic
+  adapter output).
+- Fix: `createMemoryTools` read `execute` now **always** reverses the fetched window
+  (`toReadMessages([...rows].reverse())`). Selection semantics unchanged — both cases still select
+  the newest `limit`-row window DESC (with `around`: at-or-before the instant; without: most recent
+  `limit` messages) — so `buildReadSql` is untouched apart from its docstring; only the executor's
+  ordering changed. Tool description updated ("chronological order … without it, the most recent
+  `limit` messages").
+
+### Finding 2 (Minor) — snippetOf could exceed max by 1 (161 chars)
+
+- New tests: hit-anchored snippet ≤160 and starts with `…`; head-anchored slice ≤160 without `…`.
+- Fix: `snippetOf` slices `start + (start > 0 ? max - 1 : max)` so `…` + slice ≤ max.
+  (First cut had an off-by-one — sliced to absolute index `max-1`, producing `…` alone; caught by
+  the new test and corrected to `start + (max-1)`.)
+
+### Finding 3 (Minor) — output schema `device: { type: ['string','null'] }`
+
+- Verified against the packaged host validator. `~/.dsh/profiles/node_modules/@deepseek-ai/dsh-tools`
+  is a broken symlink (→ deleted `~/deepseek-harness` checkout), so extracted
+  `dsh/node_modules/@deepseek-ai/dsh-tools/lib/{index,shared-DTdn5dXO}.js` from
+  `/Applications/DeepSeek Harness.app/Contents/Resources/app.asar` with `@electron/asar`.
+  `assertSupportedJsonSchema` (`shared-DTdn5dXO.js` ~L250/337) **explicitly rejects array-form
+  type**: "`schema.type must be a single type string (type arrays are not supported)`".
+  The supported subset is `type/oneOf/properties/required/additionalProperties/items/enum/const`
+  + annotations — `anyOf` is **not** supported either; nullable must use `oneOf` with ≥2 branches.
+- Fix: `device: { oneOf: [{ type: 'string' }, { type: 'null' }] }` in the memory_search output
+  schema. New test walks both tool schemas asserting no array-form `type`, no `anyOf`, and asserts
+  the exact oneOf form (walker recurses via `properties`/`items`/`oneOf` since a message property
+  is literally named `type`).
+
+### Evidence
+
+- `npm test`: **13 files / 249 tests passed** (28 + 1 net-new tests).
+- `npm run build`: green (prisma generate ×4 + tsc build + esbuild client 15.0kb).
+

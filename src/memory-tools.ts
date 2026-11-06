@@ -166,9 +166,10 @@ export interface ReadPlanOptions {
 }
 
 /**
- * Build the memory_read SELECT. With `around` (ISO datetime) the window is
- * the `limit` most recent rows at-or-before the instant, reversed to
- * chronological order below; without it, the first `limit` rows.
+ * Build the memory_read SELECT. Both cases fetch the newest-first (DESC)
+ * `limit`-row window — with `around`, at-or-before the instant; without it,
+ * the most recent `limit` rows of the session. The executor always reverses
+ * the rows to chronological order before handing them to the model.
  */
 export function buildReadSql(provider: DatabaseProvider, opts: ReadPlanOptions): SearchPlan {
   const limit = clampLimit(opts.limit, 30);
@@ -222,8 +223,8 @@ export function snippetOf(content: string, keywords: string[], max = 160): strin
       break;
     }
   }
-  const snippet = text.slice(start, start + max);
-  return start > 0 && snippet.length === max ? `…${snippet}` : snippet;
+  const snippet = text.slice(start, start + (start > 0 ? max - 1 : max));
+  return start > 0 ? `…${snippet}` : snippet;
 }
 
 export interface SearchHit {
@@ -383,7 +384,9 @@ export function createMemoryTools(deps: MemoryToolsDeps = {}): ToolDefinition[] 
               type: 'object',
               properties: {
                 session_id: { type: 'string' },
-                device: { type: ['string', 'null'] },
+                // The host validator (dsh-tools assertSupportedJsonSchema) rejects
+                // array-form `type` and `anyOf`; `oneOf` is the supported nullable form.
+                device: { oneOf: [{ type: 'string' }, { type: 'null' }] },
                 type: { type: 'string' },
                 created_at: { type: 'string' },
                 snippet: { type: 'string' },
@@ -418,8 +421,9 @@ export function createMemoryTools(deps: MemoryToolsDeps = {}): ToolDefinition[] 
       name: TOOL_NAMES.read,
       description:
         '读取远程记忆库中某次会话的对话上下文 / Read the conversation context of one session from the remote memory store. ' +
-        'Use after memory_search to see what happened around a hit: messages ordered by created_at ' +
-        '(with `around`, the window ends at that instant), each truncated to ≤500 chars. Read-only.',
+        'Use after memory_search to see what happened around a hit: messages are returned in chronological order ' +
+        '(with `around`, the window ends at that instant; without it, the most recent `limit` messages), ' +
+        'each truncated to ≤500 chars. Read-only.',
       parameters: objectSchema(
         {
           session_id: stringProp('memory_search 返回的 session_id / session id from memory_search'),
@@ -459,10 +463,11 @@ export function createMemoryTools(deps: MemoryToolsDeps = {}): ToolDefinition[] 
             ...(typeof args?.limit === 'number' ? { limit: args.limit } : {}),
           });
           const rows = await runSelect(connection, plan);
-          // The around window was fetched newest-first; restore chronology.
+          // Both windows (with and without `around`) were fetched newest-first;
+          // the model always receives chronological (ascending) order.
           return {
             session_id: sessionId,
-            messages: toReadMessages(typeof args?.around === 'string' && args.around ? [...rows].reverse() : rows),
+            messages: toReadMessages([...rows].reverse()),
           };
         }),
     },

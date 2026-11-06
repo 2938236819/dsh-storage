@@ -8,6 +8,7 @@ import {
   notConfiguredError,
   registerMemoryTools,
   requireConfig,
+  snippetOf,
   type RawConnection,
   type ToolDefinition,
 } from './memory-tools.js';
@@ -108,6 +109,22 @@ describe('buildSearchSql', () => {
   });
 });
 
+describe('snippetOf', () => {
+  it('keeps hit-anchored snippets at or under the documented max', () => {
+    const head = '前导背景信息很长的一段文字用来把关键词往后推。'.repeat(10);
+    const content = `${head} k8s ${'后续内容'.repeat(80)}`;
+    const snippet = snippetOf(content, ['k8s']);
+    expect(snippet.startsWith('…')).toBe(true);
+    expect(snippet.length).toBeLessThanOrEqual(160);
+    expect(snippet).toContain('k8s');
+  });
+  it('returns a head-anchored plain slice at or under max without prepending …', () => {
+    const snippet = snippetOf('x'.repeat(200), ['nothing']);
+    expect(snippet.length).toBeLessThanOrEqual(160);
+    expect(snippet.startsWith('…')).toBe(false);
+  });
+});
+
 describe('buildReadSql', () => {
   it('selects chronological window for a session', () => {
     const plan = buildReadSql('mysql', { sessionId: 's1', limit: 10 });
@@ -160,6 +177,33 @@ describe('tool definitions and registration shape', () => {
       properties: { query: { type: 'string' }, device: { enum: ['all', 'current'] } },
     });
     expect((tools[1] as ToolDefinition).parameters).toMatchObject({ required: ['session_id'] });
+  });
+
+  it('output schemas stay inside the host validator subset (no array-form type / anyOf)', () => {
+    const tools = createMemoryTools();
+    const walk = (node: any, path: string): void => {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+      if ('type' in node && typeof node.type !== 'string') console.error('BAD NODE', path, node);
+      if ('type' in node) {
+        expect(Array.isArray(node.type), `${path}.type must not be an array`).toBe(false);
+        expect(typeof node.type).toBe('string');
+      }
+      expect('anyOf' in node, `${path} must not use anyOf`).toBe(false);
+      // `node.properties` is a keyed map of schemas, not itself a schema —
+      // recurse into each property schema instead of the map.
+      if (node.properties && typeof node.properties === 'object')
+        for (const [key, value] of Object.entries(node.properties)) walk(value, `${path}.properties.${key}`);
+      if (node.items) walk(node.items, `${path}.items`);
+      if (Array.isArray(node.oneOf)) node.oneOf.forEach((branch: any, i: number) => walk(branch, `${path}.oneOf[${i}]`));
+    };
+    for (const tool of tools) {
+      walk(tool.parameters, `${tool.name}.parameters`);
+      walk(tool.output.schema, `${tool.name}.output.schema`);
+    }
+    const searchSchema = (tools[0] as ToolDefinition).output.schema as any;
+    expect(searchSchema.properties.hits.items.properties.device).toEqual({
+      oneOf: [{ type: 'string' }, { type: 'null' }],
+    });
   });
 
   it('output.render serializes the value as text', () => {
@@ -272,7 +316,7 @@ describe('memory_read execution', () => {
 
   it('returns chronological role-mapped messages with ≤500-char contents', async () => {
     const dir = configDir(enabledConfig);
-    const connection = fakeConnection(rows);
+    const connection = fakeConnection([rows[1], rows[0]]);
     const [, read] = createMemoryTools({ configPath: join(dir, 'dsh-storage.json'), connect: async () => connection });
     const result: any = await read.execute({ session_id: 's1' }, {});
     expect(result.session_id).toBe('s1');
@@ -290,6 +334,19 @@ describe('memory_read execution', () => {
     const result: any = await read.execute({ session_id: 's1', around: '2026-11-06T09:00:10' }, {});
     expect(result.messages[0].content).toBe('你好');
     expect(connection.queries[0].args).toEqual(['s1', '2026-11-06T09:00:10', 30]);
+  });
+
+  it('returns the newest window in chronological (ascending) order without around', async () => {
+    const dir = configDir(enabledConfig);
+    // Adapter rows arrive newest-first (SQL ORDER BY DESC); the executor must
+    // restore chronology for the model even without `around`.
+    const connection = fakeConnection([rows[1], rows[0]]);
+    const [, read] = createMemoryTools({ configPath: join(dir, 'dsh-storage.json'), connect: async () => connection });
+    const result: any = await read.execute({ session_id: 's1' }, {});
+    expect(result.messages[0].content).toBe('你好');
+    expect(result.messages[1].content.startsWith('你好！')).toBe(true);
+    expect(result.messages[0].created_at < result.messages[1].created_at).toBe(true);
+    expect(connection.queries[0].args).toEqual(['s1', 30]);
   });
 
   it('returns an empty window for a missing session_id arg', async () => {
