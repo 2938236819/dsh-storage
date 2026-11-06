@@ -1,0 +1,371 @@
+# Phase2 fix-round package (bd805ff..510910b)
+
+510910b fix: memory_read chronological order, snippet ≤max, nullable device via oneOf
+
+ .superpowers/sdd/rebuild/phase2-report.md | 47 ++++++++++++++++++++++++
+ src/memory-tools.test.ts                  | 59 ++++++++++++++++++++++++++++++-
+ src/memory-tools.ts                       | 25 +++++++------
+ 3 files changed, 120 insertions(+), 11 deletions(-)
+
+diff --git a/.superpowers/sdd/rebuild/phase2-report.md b/.superpowers/sdd/rebuild/phase2-report.md
+index 0678ef9..36d3b6f 100644
+--- a/.superpowers/sdd/rebuild/phase2-report.md
++++ b/.superpowers/sdd/rebuild/phase2-report.md
+@@ -95,10 +95,57 @@ All four adapters' `queryRaw` return `{ columnNames, rows: value[][] }` — norm
+ ## 5. Concerns / notes
+ 
+ - `~/.dsh/profiles/node_modules/@deepseek-ai/dsh-tools` symlink is broken; if the host ever resolves
+   plugin `ctx.inject(['tools'])` differently than the packaged runtime, registration would log-and-skip
+   (graceful degradation built in).
+ - Fulltext index not used (spec: optional future); LIKE over `content` is fine at personal scale.
+ - Archived history rows (`history_id` non-null) are intentionally included in search (memory recall),
+   while readToolCallMessages-style active-only filtering was not applied.
+ - `memory_read` with `around` returns the ≤limit window ending at the instant (not ±half-window);
+   simple and provider-portable, documented in the tool description.
++
++## 6. Fix round (review follow-up, 2026-11-06)
++
++TDD: failing tests written first (`npx vitest run src/memory-tools.test.ts` → 3 failed / 26 passed),
++then fixes, then full suite + build green.
++
++### Finding 1 (Important) — memory_read without `around` returned newest-first order
++
++- `src/memory-tools.test.ts`: new execution test "returns the newest window in chronological
++  (ascending) order without `around`" — fake connection returns newest-first rows (as the DESC SQL
++  does); expects `messages[0]` = oldest (`你好`), ascending `created_at`, args `['s1', 30]`.
++  Also adjusted the pre-existing chronological test to feed newest-first fixture rows (realistic
++  adapter output).
++- Fix: `createMemoryTools` read `execute` now **always** reverses the fetched window
++  (`toReadMessages([...rows].reverse())`). Selection semantics unchanged — both cases still select
++  the newest `limit`-row window DESC (with `around`: at-or-before the instant; without: most recent
++  `limit` messages) — so `buildReadSql` is untouched apart from its docstring; only the executor's
++  ordering changed. Tool description updated ("chronological order … without it, the most recent
++  `limit` messages").
++
++### Finding 2 (Minor) — snippetOf could exceed max by 1 (161 chars)
++
++- New tests: hit-anchored snippet ≤160 and starts with `…`; head-anchored slice ≤160 without `…`.
++- Fix: `snippetOf` slices `start + (start > 0 ? max - 1 : max)` so `…` + slice ≤ max.
++  (First cut had an off-by-one — sliced to absolute index `max-1`, producing `…` alone; caught by
++  the new test and corrected to `start + (max-1)`.)
++
++### Finding 3 (Minor) — output schema `device: { type: ['string','null'] }`
++
++- Verified against the packaged host validator. `~/.dsh/profiles/node_modules/@deepseek-ai/dsh-tools`
++  is a broken symlink (→ deleted `~/deepseek-harness` checkout), so extracted
++  `dsh/node_modules/@deepseek-ai/dsh-tools/lib/{index,shared-DTdn5dXO}.js` from
++  `/Applications/DeepSeek Harness.app/Contents/Resources/app.asar` with `@electron/asar`.
++  `assertSupportedJsonSchema` (`shared-DTdn5dXO.js` ~L250/337) **explicitly rejects array-form
++  type**: "`schema.type must be a single type string (type arrays are not supported)`".
++  The supported subset is `type/oneOf/properties/required/additionalProperties/items/enum/const`
++  + annotations — `anyOf` is **not** supported either; nullable must use `oneOf` with ≥2 branches.
++- Fix: `device: { oneOf: [{ type: 'string' }, { type: 'null' }] }` in the memory_search output
++  schema. New test walks both tool schemas asserting no array-form `type`, no `anyOf`, and asserts
++  the exact oneOf form (walker recurses via `properties`/`items`/`oneOf` since a message property
++  is literally named `type`).
++
++### Evidence
++
++- `npm test`: **13 files / 249 tests passed** (28 + 1 net-new tests).
++- `npm run build`: green (prisma generate ×4 + tsc build + esbuild client 15.0kb).
++
+diff --git a/src/memory-tools.test.ts b/src/memory-tools.test.ts
+index fb26201..d21aea7 100644
+--- a/src/memory-tools.test.ts
++++ b/src/memory-tools.test.ts
+@@ -1,20 +1,21 @@
+ import { describe, expect, it, vi } from 'vitest';
+ import {
+   buildReadSql,
+   buildSearchSql,
+   createMemoryTools,
+   escapeLike,
+   normalizeRows,
+   notConfiguredError,
+   registerMemoryTools,
+   requireConfig,
++  snippetOf,
+   type RawConnection,
+   type ToolDefinition,
+ } from './memory-tools.js';
+ import { DEFAULT_CONFIG, saveConfig, type SyncConfig } from './config.js';
+ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ import { afterEach } from 'vitest';
+ 
+ const dirs: string[] = [];
+@@ -101,20 +102,36 @@ describe('buildSearchSql', () => {
+   });
+ 
+   it('keeps base conditions (deleted_at null, content present, no type filter)', () => {
+     const plan = buildSearchSql('postgresql', { query: 'x' });
+     expect(plan.sql).toContain('deleted_at IS NULL');
+     expect(plan.sql).toContain('content IS NOT NULL');
+     expect(plan.sql).not.toMatch(/type\s*=/);
+   });
+ });
+ 
++describe('snippetOf', () => {
++  it('keeps hit-anchored snippets at or under the documented max', () => {
++    const head = '前导背景信息很长的一段文字用来把关键词往后推。'.repeat(10);
++    const content = `${head} k8s ${'后续内容'.repeat(80)}`;
++    const snippet = snippetOf(content, ['k8s']);
++    expect(snippet.startsWith('…')).toBe(true);
++    expect(snippet.length).toBeLessThanOrEqual(160);
++    expect(snippet).toContain('k8s');
++  });
++  it('returns a head-anchored plain slice at or under max without prepending …', () => {
++    const snippet = snippetOf('x'.repeat(200), ['nothing']);
++    expect(snippet.length).toBeLessThanOrEqual(160);
++    expect(snippet.startsWith('…')).toBe(false);
++  });
++});
++
+ describe('buildReadSql', () => {
+   it('selects chronological window for a session', () => {
+     const plan = buildReadSql('mysql', { sessionId: 's1', limit: 10 });
+     expect(plan.sql).toContain('session_id = ? AND deleted_at IS NULL');
+     expect(plan.args).toEqual(['s1', 10]);
+   });
+ 
+   it('windows at-or-before the around instant (desc) for centering', () => {
+     const plan = buildReadSql('postgresql', { sessionId: 's1', around: '2026-11-06T10:00:00' });
+     expect(plan.sql).toContain('created_at <= ?');
+@@ -155,20 +172,47 @@ describe('tool definitions and registration shape', () => {
+       expect(typeof tool.execute).toBe('function');
+     }
+     const search = tools[0] as ToolDefinition;
+     expect(search.parameters).toMatchObject({
+       required: ['query'],
+       properties: { query: { type: 'string' }, device: { enum: ['all', 'current'] } },
+     });
+     expect((tools[1] as ToolDefinition).parameters).toMatchObject({ required: ['session_id'] });
+   });
+ 
++  it('output schemas stay inside the host validator subset (no array-form type / anyOf)', () => {
++    const tools = createMemoryTools();
++    const walk = (node: any, path: string): void => {
++      if (!node || typeof node !== 'object' || Array.isArray(node)) return;
++      if ('type' in node && typeof node.type !== 'string') console.error('BAD NODE', path, node);
++      if ('type' in node) {
++        expect(Array.isArray(node.type), `${path}.type must not be an array`).toBe(false);
++        expect(typeof node.type).toBe('string');
++      }
++      expect('anyOf' in node, `${path} must not use anyOf`).toBe(false);
++      // `node.properties` is a keyed map of schemas, not itself a schema —
++      // recurse into each property schema instead of the map.
++      if (node.properties && typeof node.properties === 'object')
++        for (const [key, value] of Object.entries(node.properties)) walk(value, `${path}.properties.${key}`);
++      if (node.items) walk(node.items, `${path}.items`);
++      if (Array.isArray(node.oneOf)) node.oneOf.forEach((branch: any, i: number) => walk(branch, `${path}.oneOf[${i}]`));
++    };
++    for (const tool of tools) {
++      walk(tool.parameters, `${tool.name}.parameters`);
++      walk(tool.output.schema, `${tool.name}.output.schema`);
++    }
++    const searchSchema = (tools[0] as ToolDefinition).output.schema as any;
++    expect(searchSchema.properties.hits.items.properties.device).toEqual({
++      oneOf: [{ type: 'string' }, { type: 'null' }],
++    });
++  });
++
+   it('output.render serializes the value as text', () => {
+     const [tool] = createMemoryTools();
+     expect(tool.output.render({}, { hits: [] })).toEqual([{ type: 'text', text: '{"hits":[]}' }]);
+   });
+ 
+   it('registers through ctx.inject(["tools"]) with per-tool effects', () => {
+     const register = vi.fn();
+     const effects: Array<() => unknown> = [];
+     const ctx = {
+       inject(services: string[], cb: (toolCtx: any) => void) {
+@@ -265,38 +309,51 @@ describe('memory_search execution', () => {
+ });
+ 
+ describe('memory_read execution', () => {
+   const rows = [
+     { type: 'user', content: '你好', created_at: '2026-11-06T09:00:00+00:00' },
+     { type: 'model', content: '你好！有什么可以帮你？'.repeat(60), created_at: '2026-11-06T09:00:05+00:00' },
+   ];
+ 
+   it('returns chronological role-mapped messages with ≤500-char contents', async () => {
+     const dir = configDir(enabledConfig);
+-    const connection = fakeConnection(rows);
++    const connection = fakeConnection([rows[1], rows[0]]);
+     const [, read] = createMemoryTools({ configPath: join(dir, 'dsh-storage.json'), connect: async () => connection });
+     const result: any = await read.execute({ session_id: 's1' }, {});
+     expect(result.session_id).toBe('s1');
+     expect(result.messages).toHaveLength(2);
+     expect(result.messages[0]).toMatchObject({ role: 'user', type: 'user', content: '你好' });
+     expect(result.messages[1].role).toBe('assistant');
+     expect(result.messages[1].content.length).toBeLessThanOrEqual(500);
+     expect(result.messages[1].content.endsWith('…')).toBe(true);
+   });
+ 
+   it('reverses the around window to chronological order', async () => {
+     const dir = configDir(enabledConfig);
+     const connection = fakeConnection([rows[1], rows[0]]);
+     const [, read] = createMemoryTools({ configPath: join(dir, 'dsh-storage.json'), connect: async () => connection });
+     const result: any = await read.execute({ session_id: 's1', around: '2026-11-06T09:00:10' }, {});
+     expect(result.messages[0].content).toBe('你好');
+     expect(connection.queries[0].args).toEqual(['s1', '2026-11-06T09:00:10', 30]);
+   });
+ 
++  it('returns the newest window in chronological (ascending) order without around', async () => {
++    const dir = configDir(enabledConfig);
++    // Adapter rows arrive newest-first (SQL ORDER BY DESC); the executor must
++    // restore chronology for the model even without `around`.
++    const connection = fakeConnection([rows[1], rows[0]]);
++    const [, read] = createMemoryTools({ configPath: join(dir, 'dsh-storage.json'), connect: async () => connection });
++    const result: any = await read.execute({ session_id: 's1' }, {});
++    expect(result.messages[0].content).toBe('你好');
++    expect(result.messages[1].content.startsWith('你好！')).toBe(true);
++    expect(result.messages[0].created_at < result.messages[1].created_at).toBe(true);
++    expect(connection.queries[0].args).toEqual(['s1', 30]);
++  });
++
+   it('returns an empty window for a missing session_id arg', async () => {
+     const dir = configDir(enabledConfig);
+     const connection = fakeConnection(rows);
+     const [, read] = createMemoryTools({ configPath: join(dir, 'dsh-storage.json'), connect: async () => connection });
+     expect(await read.execute({}, {})).toEqual({ session_id: '', messages: [] });
+     expect(connection.queries).toHaveLength(0);
+   });
+ });
+diff --git a/src/memory-tools.ts b/src/memory-tools.ts
+index 2c12b5d..13f8e38 100644
+--- a/src/memory-tools.ts
++++ b/src/memory-tools.ts
+@@ -159,23 +159,24 @@ export function buildSearchSql(
+   return { sql, args, argTypes: args.map(argTypeOf) };
+ }
+ 
+ export interface ReadPlanOptions {
+   sessionId: string;
+   around?: string;
+   limit?: number;
+ }
+ 
+ /**
+- * Build the memory_read SELECT. With `around` (ISO datetime) the window is
+- * the `limit` most recent rows at-or-before the instant, reversed to
+- * chronological order below; without it, the first `limit` rows.
++ * Build the memory_read SELECT. Both cases fetch the newest-first (DESC)
++ * `limit`-row window — with `around`, at-or-before the instant; without it,
++ * the most recent `limit` rows of the session. The executor always reverses
++ * the rows to chronological order before handing them to the model.
+  */
+ export function buildReadSql(provider: DatabaseProvider, opts: ReadPlanOptions): SearchPlan {
+   const limit = clampLimit(opts.limit, 30);
+   const args: unknown[] = [opts.sessionId];
+   let where = 'session_id = ? AND deleted_at IS NULL';
+   if (opts.around) {
+     where += ' AND created_at <= ?';
+     args.push(opts.around);
+   }
+   const columns = 'type, content, created_at';
+@@ -215,22 +216,22 @@ function isoOf(value: unknown): string {
+ export function snippetOf(content: string, keywords: string[], max = 160): string {
+   const text = content.replace(/\s+/g, ' ').trim();
+   let start = 0;
+   for (const keyword of keywords) {
+     const index = text.toLowerCase().indexOf(keyword.toLowerCase());
+     if (index > 20) {
+       start = Math.max(0, index - 40);
+       break;
+     }
+   }
+-  const snippet = text.slice(start, start + max);
+-  return start > 0 && snippet.length === max ? `…${snippet}` : snippet;
++  const snippet = text.slice(start, start + (start > 0 ? max - 1 : max));
++  return start > 0 ? `…${snippet}` : snippet;
+ }
+ 
+ export interface SearchHit {
+   session_id: string;
+   device: string | null;
+   type: string;
+   created_at: string;
+   snippet: string;
+ }
+ 
+@@ -376,21 +377,23 @@ export function createMemoryTools(deps: MemoryToolsDeps = {}): ToolDefinition[]
+       ),
+       output: jsonOutput({
+         type: 'object',
+         properties: {
+           hits: {
+             type: 'array',
+             items: {
+               type: 'object',
+               properties: {
+                 session_id: { type: 'string' },
+-                device: { type: ['string', 'null'] },
++                // The host validator (dsh-tools assertSupportedJsonSchema) rejects
++                // array-form `type` and `anyOf`; `oneOf` is the supported nullable form.
++                device: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                 type: { type: 'string' },
+                 created_at: { type: 'string' },
+                 snippet: { type: 'string' },
+               },
+               required: ['session_id', 'type', 'created_at', 'snippet'],
+             },
+           },
+         },
+         required: ['hits'],
+       }),
+@@ -411,22 +414,23 @@ export function createMemoryTools(deps: MemoryToolsDeps = {}): ToolDefinition[]
+             config.device,
+           );
+           const rows = await runSelect(connection, plan);
+           return { hits: toSearchHits(rows, keywords) };
+         }),
+     },
+     {
+       name: TOOL_NAMES.read,
+       description:
+         '读取远程记忆库中某次会话的对话上下文 / Read the conversation context of one session from the remote memory store. ' +
+-        'Use after memory_search to see what happened around a hit: messages ordered by created_at ' +
+-        '(with `around`, the window ends at that instant), each truncated to ≤500 chars. Read-only.',
++        'Use after memory_search to see what happened around a hit: messages are returned in chronological order ' +
++        '(with `around`, the window ends at that instant; without it, the most recent `limit` messages), ' +
++        'each truncated to ≤500 chars. Read-only.',
+       parameters: objectSchema(
+         {
+           session_id: stringProp('memory_search 返回的 session_id / session id from memory_search'),
+           around: stringProp('可选，ISO 日期时间；返回该时刻（含）之前的窗口 / optional ISO datetime center'),
+           limit: intProp('返回消息条数上限，默认 30，最大 100 / max messages, default 30, max 100'),
+         },
+         ['session_id'],
+       ),
+       output: jsonOutput({
+         type: 'object',
+@@ -452,24 +456,25 @@ export function createMemoryTools(deps: MemoryToolsDeps = {}): ToolDefinition[]
+         withConnection(exec, async (connection, config) => {
+           const sessionId = typeof args?.session_id === 'string' ? args.session_id : '';
+           if (!sessionId)
+             return { session_id: '', messages: [] };
+           const plan = buildReadSql(config.provider, {
+             sessionId,
+             ...(typeof args?.around === 'string' && args.around ? { around: args.around } : {}),
+             ...(typeof args?.limit === 'number' ? { limit: args.limit } : {}),
+           });
+           const rows = await runSelect(connection, plan);
+-          // The around window was fetched newest-first; restore chronology.
++          // Both windows (with and without `around`) were fetched newest-first;
++          // the model always receives chronological (ascending) order.
+           return {
+             session_id: sessionId,
+-            messages: toReadMessages(typeof args?.around === 'string' && args.around ? [...rows].reverse() : rows),
++            messages: toReadMessages([...rows].reverse()),
+           };
+         }),
+     },
+   ];
+ }
+ 
+ /**
+  * Register the memory tools on the host `tools` service (dsh-tools):
+  * `ctx.inject(['tools'], (toolCtx) => toolCtx.effect(() => tools.register(def)))`
+  * — the ds-harness-remote idiom. Tools are host-side only; nothing client-side.

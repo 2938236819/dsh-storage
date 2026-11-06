@@ -109,9 +109,10 @@ export interface ReadPlanOptions {
     limit?: number;
 }
 /**
- * Build the memory_read SELECT. With `around` (ISO datetime) the window is
- * the `limit` most recent rows at-or-before the instant, reversed to
- * chronological order below; without it, the first `limit` rows.
+ * Build the memory_read SELECT. Both cases fetch the newest-first (DESC)
+ * `limit`-row window — with `around`, at-or-before the instant; without it,
+ * the most recent `limit` rows of the session. The executor always reverses
+ * the rows to chronological order before handing them to the model.
  */
 export declare function buildReadSql(provider: DatabaseProvider, opts: ReadPlanOptions): SearchPlan;
 /**

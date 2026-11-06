@@ -1,6 +1,6 @@
 {
   "name": "@wfm-cn/dsh-storage",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Session storage mirror for DeepSeek Harness: projects the session event stream into MySQL/PostgreSQL/SQLite/SQL Server (ai_messages / ai_chat_histories) without replacing dsh's local persistence.",
   "type": "module",
   "main": "lib/index.js",
