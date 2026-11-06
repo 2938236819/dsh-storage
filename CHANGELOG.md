@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 (2026-11-06)
+
+### Changed
+- memory_search / memory_read 工具描述加入硬约束：仅当用户明确要求查询历史/跨设备记忆时才调用，防止 AI 自动触发读取导致会话混淆。
 ## 0.2.0 (2026-11-06)
 
 Fork of [`@amaster.ai/dsh-storage`](https://github.com/TGYD-helige/dsh-plugins) 0.1.40 (MIT), published as `@wfm-cn/dsh-storage`. Table schema and deterministic primary-key hashing are unchanged from upstream 0.1.40 — an existing upstream-written database is taken over with zero migration and zero duplication.
