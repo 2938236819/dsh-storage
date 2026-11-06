@@ -1,0 +1,11 @@
+packages:
+  - .
+nodeLinker: hoisted
+autoInstallPeers: false
+minimumReleaseAge: 0
+onlyBuiltDependencies:
+  - prisma
+  - "@prisma/client"
+  - "@prisma/engines"
+patchedDependencies:
+  "@prisma/adapter-mariadb@7.9.1": patches/@prisma__adapter-mariadb@7.9.1.patch

@@ -50,7 +50,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.5"
+    "@deepseek-ai/schemastery": "^3.18.5",
+    "@prisma/client": "7.9.1",
+    "@prisma/adapter-mariadb": "7.9.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -119,6 +121,9 @@
       "@prisma/engines",
       "esbuild",
       "prisma"
-    ]
+    ],
+    "patchedDependencies": {
+      "@prisma/adapter-mariadb@7.9.1": "patches/@prisma__adapter-mariadb@7.9.1.patch"
+    }
   }
 }

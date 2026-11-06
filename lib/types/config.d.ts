@@ -12,6 +12,13 @@ export declare const DEFAULT_CONFIG: SyncConfig;
 /** Resolve the DSH home directory: $DSH_HOME or ~/.dsh. */
 export declare function dshHome(): string;
 export declare function defaultConfigPath(): string;
+/**
+ * Parse a config timezone string ('+08:00', '-05:00', '+05:30', 'Z'/'UTC')
+ * into signed minutes east of UTC. Invalid or absent input → 0 (the caller
+ * decides whether to warn). This mirrors what the patched
+ * @prisma/adapter-mariadb reads via globalThis.__DSH_STORAGE_TZ_OFFSET_MIN__.
+ */
+export declare function tzOffsetMinutes(tz: string): number;
 /** Valid TCP port for the form: a finite integer in [0, 65535] (0 allowed for sqlite configs). */
 export declare function isValidPort(value: unknown): value is number;
 /**

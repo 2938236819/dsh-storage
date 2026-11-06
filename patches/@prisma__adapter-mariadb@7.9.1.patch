@@ -1,0 +1,37 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index e292810f594bb8a66a7f33c3e7c524781e9281fc..2e2276a3a58a08b5d15acb348783f47b3004421e 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -125,16 +125,29 @@ var typeCast = (field, next) => {
+   }
+   return next();
+ };
+-function formatDateTime(date) {
++function __tzOffsetMs() {
++  try {
++    const tz = globalThis.__DSH_STORAGE_TZ_OFFSET_MIN__;
++    return typeof tz === "number" ? tz * 60 * 1000 : 0;
++  } catch { return 0; }
++}
++function __shifted(date) {
++  const off = __tzOffsetMs();
++  return off ? new Date(date.getTime() + off) : date;
++}
++function formatDateTime(date0) {
++  const date = __shifted(date0);
+   const pad = (n, z = 2) => String(n).padStart(z, "0");
+   const ms = date.getUTCMilliseconds();
+   return pad(date.getUTCFullYear(), 4) + "-" + pad(date.getUTCMonth() + 1) + "-" + pad(date.getUTCDate()) + " " + pad(date.getUTCHours()) + ":" + pad(date.getUTCMinutes()) + ":" + pad(date.getUTCSeconds()) + (ms ? "." + String(ms).padStart(3, "0") : "");
+ }
+-function formatDate(date) {
++function formatDate(date0) {
++  const date = __shifted(date0);
+   const pad = (n, z = 2) => String(n).padStart(z, "0");
+   return pad(date.getUTCFullYear(), 4) + "-" + pad(date.getUTCMonth() + 1) + "-" + pad(date.getUTCDate());
+ }
+-function formatTime(date) {
++function formatTime(date0) {
++  const date = __shifted(date0);
+   const pad = (n, z = 2) => String(n).padStart(z, "0");
+   const ms = date.getUTCMilliseconds();
+   return pad(date.getUTCHours()) + ":" + pad(date.getUTCMinutes()) + ":" + pad(date.getUTCSeconds()) + (ms ? "." + String(ms).padStart(3, "0") : "");
