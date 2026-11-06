@@ -1,22 +1,12 @@
-/**
- * 断档补传 (gap backfill): after the mirror was down for a while, local
- * session logs (`$DSH_HOME/sessions/<workspace-dir>/<session-id>/session.v4
- * .jsonl` or its `.zstd` twin) hold events that never reached the database.
- *
- * computeGap picks the sessions whose latest local activity (file mtime) is
- * newer than what the database already has; replayEvents re-feeds the missing
- * events through the same projector the live tap uses, with idempotent
- * semantics — rows whose deterministic id already exists are skipped, so
- * running a backfill twice never duplicates data.
- *
- * zstd: fflate/gzip inflate cannot decode zstd frames — decompression shells
- * out to the system `zstd` binary (`zstd -dc`, falling back to `unzstd` /
- * `zstdcat`). When none of them exists the read fails with a clear error
- * naming the requirement (verified on macOS: /opt/homebrew/bin/zstd).
- */
 import type { StorageBackend } from './types.js';
 /** Exactly the event types the live tap mirrors (see index.ts session/event). */
 export declare const MIRROR_EVENT_TYPES: readonly ["user/message", "assistant/message", "assistant/attempt", "tool/result", "turn/end", "session/title", "compaction/end"];
+interface MirrorEvent {
+    type: string;
+    seq?: number;
+    time?: number;
+    data?: Record<string, unknown>;
+}
 /** Metadata key for the usage high-water mark — shared with the live tap. */
 export declare const LAST_USAGE_KEY = "dsh-storage:lastUsage";
 /** One session with missing events: replay starts at `fromSeq` (inclusive). */
@@ -34,18 +24,20 @@ export interface BackfillSummary {
     /** Per-session failures — one entry per session that could not be replayed. */
     errors: string[];
 }
+interface LogFile {
+    file: string;
+    mtime: Date;
+}
+interface SessionLog extends LogFile {
+    sessionId: string;
+}
 /**
  * Read one session log as text. Plain files are read directly; `.zstd` files
  * are decompressed through the first available system binary.
  */
 export declare function readSessionLogText(file: string, binaries?: readonly string[]): Promise<string>;
 /** Parse JSONL lines into event objects; malformed lines are skipped. */
-export declare function parseSessionEvents(text: string): any[];
-interface SessionLog {
-    sessionId: string;
-    file: string;
-    mtime: Date;
-}
+export declare function parseSessionEvents(text: string): MirrorEvent[];
 /**
  * Enumerate session logs. Real DSH layout is
  * `<sessionsDir>/<workspace-dir>/<session-id>/session.v4.jsonl[.zstd]`

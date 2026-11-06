@@ -1,8 +1,3 @@
-/**
- * Health monitor for the sync backend: a small state machine around a probe
- * (connect + SELECT 1 + table existence check) with exponential-backoff
- * retries, plus the one-shot `testConnection` used by the settings panel.
- */
 import { type SyncConfig } from './config.js';
 export type HealthStatus = {
     state: 'ok' | 'down' | 'disabled' | 'config-error';

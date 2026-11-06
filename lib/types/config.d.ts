@@ -1,11 +1,3 @@
-/**
- * Standalone sync configuration persisted as JSON at
- * `$DSH_HOME/dsh-storage.json` (DSH_HOME env var, default ~/.dsh).
- *
- * The settings panel writes this file; the backend watches it to rebuild
- * database connections without a restart. Loading never throws: corrupt or
- * wrong-shape files fall back to defaults with an error flag.
- */
 export type SyncConfig = {
     enabled: boolean;
     provider: 'mysql' | 'postgresql' | 'sqlite' | 'sqlserver';

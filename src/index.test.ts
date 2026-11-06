@@ -1,5 +1,8 @@
 import { Context } from '@deepseek-ai/cordis';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { apply, inject, name } from './index.js';
 
 const backends = vi.hoisted(() => ({
@@ -89,6 +92,10 @@ describe('dsh-storage plugin', () => {
     backends.initImpl = undefined;
     seq = 0;
     ctx = new Context();
+    // The mirror derives its effective config from $DSH_HOME/dsh-storage.json
+    // when that file exists — isolate each test in a fresh empty DSH home so
+    // the legacy yaml Config fallback drives the mirror.
+    process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-storage-test-'));
   });
 
   it('exposes the plugin name and no hard injects', () => {
@@ -116,7 +123,7 @@ describe('dsh-storage plugin', () => {
       expect.arrayContaining(['session/event', 'session/disposed', 'session/flush']),
     );
     const backend = backends.instances[0];
-    expect(backend.config).toEqual({ provider: 'mysql', url: enabledConfig.database.url });
+    expect(backend.config).toEqual({ provider: 'mysql', url: enabledConfig.database.url, timezone: undefined });
 
     // No 'ready' event in this cordis fork — init starts at plugin load.
     await flush();

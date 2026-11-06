@@ -394,10 +394,18 @@ describe('DatabaseBackend', () => {
     expect(prisma.aiMessage.findMany.mock.calls[0][0].where.id).toBe('target');
   });
 
-  it('builds the mysql adapter from a mariadb:// url', async () => {
-    backend = new DatabaseBackend({ provider: 'mysql', url: 'mysql://u:p@host:3306/db' });
+  it('builds the mysql adapter from discrete decoded options with a timezone', async () => {
+    backend = new DatabaseBackend({
+      provider: 'mysql',
+      url: 'mysql://u%40x:p%2Fw@host:3306/my%20db',
+      timezone: '+08:00',
+    });
     await backend.init();
-    expect(adapterMocks.calls.mariadb).toEqual(['mariadb://u:p@host:3306/db']);
+    // URI-string construction pool-times-out on real MySQL — the adapter is
+    // built from discrete options, percent-decoded, plus the driver timezone.
+    expect(adapterMocks.calls.mariadb).toEqual([
+      { host: 'host', port: 3306, user: 'u@x', password: 'p/w', database: 'my db', timezone: '+08:00' },
+    ]);
   });
 
   it('builds the postgresql adapter from the connection string', async () => {
