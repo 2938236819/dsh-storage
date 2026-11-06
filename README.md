@@ -92,6 +92,15 @@ npx prisma db push --schema node_modules/@wfm-cn/dsh-storage/prisma/schema.mysql
 
 镜像为无抛出缝隙：数据库错误带 `[dsh-storage]` 前缀记日志，绝不逃逸进 agent 循环；本地 DSH 持久化始终是权威数据源。成功的原生压缩事件同时写入 `utility_compressor` 快照消息（source 兼容的 `Content[]`）。完整投影语义（工具结果合并、thoughts 签名、压缩快照续读等）与上游 0.1.40 一致，详见上游文档。
 
+## AI 记忆查询工具（Phase 2）
+
+插件在宿主 `tools` 服务上注册两个只读的模型工具（host-side，无需客户端配合），让 AI 能检索/回忆镜像到数据库的历史对话（跨设备记忆）：
+
+- **`memory_search`** — `{ query, device?: 'all'|'current', limit?, since? }`：关键词（SQL LIKE OR 语义，通配符已转义）搜索 `ai_messages` 用户+模型行，返回 `{session_id, device, type, created_at, snippet(≤160)}`，按时间倒序。
+- **`memory_read`** — `{ session_id, around?, limit? }`：按 `created_at` 返回该会话的对话上下文（`around` 时为该时刻及之前的窗口，恢复正序），每条内容截断 ≤500 字符。
+
+两个工具复用同步配置（`$DSH_HOME/dsh-storage.json`）：同步未配置/未启用时返回友好错误提示（引导到「会话存储」面板）。每次调用创建一次性只读连接（仅 SELECT），用完即释放；所有用户输入参数化绑定（显式 argTypes，兼容 adapter 7.9.1/7.10+），LIKE 通配符用 `ESCAPE '~'` 转义。
+
 ## 已知限制
 
 - **PostgreSQL / SQL Server 建表需要 prisma CLI**：面板"建表"按钮的嵌入式 DDL 仅覆盖 MySQL 与 SQLite；pg/mssql 走 `prisma db push` 路线，失败时会明确提示需要 prisma CLI（或用上文的 `npx prisma db push` 手动建表）。

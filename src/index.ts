@@ -47,6 +47,7 @@ import {
   type HealthStatus,
 } from './health.js';
 import { drainToasts, wireNotifications, type StorageToast } from './notify.js';
+import { registerMemoryTools } from './memory-tools.js';
 import { mergeToolResult, projectEvent, toolResultCallId, usageSampleOf } from './projector.js';
 import { registerStatusRoute } from './status-route.js';
 import type { MessageRow } from './types.js';
@@ -268,6 +269,10 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
     },
   };
   ctx.provide('dshStorageStatus', statusService);
+  // Phase 2: AI memory tools (memory_search / memory_read) — host-side only,
+  // registered on the dsh-tools service; a disabled/unconfigured sync config
+  // surfaces as a friendly error at call time, never at registration.
+  registerMemoryTools(ctx as unknown as Parameters<typeof registerMemoryTools>[0]);
   // Browser bridge (Task 5): the settings panel client calls this over the
   // connection generic-RPC channel. Optional services — profiles without a
   // web carrier simply skip the route.
