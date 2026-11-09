@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 (2026-11-10)
+
+### Fixed (Critical)
+- 状态路由改用 ctx.inject 等待 webServer/connection 组合完成后再注册：修复插件 apply 先于宿主服务组合时路由被永久跳过的问题（面板 HTTP 405 + 镜像静默不工作的根因）。
 ## 0.3.2 (2026-11-09)
 
 ### Fixed (Critical)
