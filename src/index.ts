@@ -272,7 +272,6 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
   // Phase 2: AI memory tools (memory_search / memory_read) — host-side only,
   // registered on the dsh-tools service; a disabled/unconfigured sync config
   // surfaces as a friendly error at call time, never at registration.
-  registerMemoryTools(ctx as unknown as Parameters<typeof registerMemoryTools>[0]);
   // Browser bridge (Task 5): the settings panel client calls this over the
   // connection generic-RPC channel. Optional services — profiles without a
   // web carrier simply skip the route.
@@ -280,6 +279,17 @@ export function apply(ctx: Context, config: StoragePluginConfig): void {
     const dispose = registerStatusRoute(ctx, statusService);
     return () => dispose?.();
   });
+  // Phase 2: AI memory tools (memory_search / memory_read) — host-side only.
+  // MUST come after the status route + mirror wiring above: on profiles where
+  // the 'tools' service never resolves, cordis leaves this sub-plugin fiber
+  // pending forever and — in a buggy fork of cordis — can even fail it, which
+  // used to abort apply() before the route/mirror registrations (panel 405 +
+  // silent no-mirroring). try/catch + late ordering isolate that blast radius.
+  try {
+    registerMemoryTools(ctx as unknown as Parameters<typeof registerMemoryTools>[0]);
+  } catch (error) {
+    console.error('[dsh-storage] memory tools registration failed (continuing without them):', error);
+  }
   // C1: the mirror derives its effective config from the same source the
   // panel/health/backfill use — $DSH_HOME/dsh-storage.json. The JSON file
   // wins whenever it exists (enabled:false in JSON means OFF, even when a
