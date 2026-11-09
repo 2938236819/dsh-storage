@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 (2026-11-09)
+
+### Fixed (Critical)
+- 修复注册顺序缺陷：profiles 缺少 tools 服务时，memory tools 注入会中断插件 apply，导致设置面板 RPC 405、镜像静默停止。现在路由/镜像注册先行且受 try/catch 隔离，tools 缺失只影响记忆查询工具本身。
 ## 0.3.1 (2026-11-06)
 
 ### Changed
